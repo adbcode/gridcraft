@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-12 · **Change:** minor (rows auto-fit oversized fonts on open and whole-row/column formatting) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-21 · **Change:** minor (fork agentic foundation; existing parity assessment unchanged) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -10,6 +10,14 @@ docs; the summary is in [target-app-parity.md](target-app-parity.md).
 
 Kinds: **F** feature · **U** UI/UX · **FF** file format · **H** hardware · **L** localization ·
 **P** performance · **S** stability.
+
+## Fork integration work
+
+The [agentic foundation](agentic/README.md) provides a Rust/egui panel in the existing
+application, the live-session boundary and deterministic offline fixture behavior. Rules and
+conversation are session-only. Remaining product work: broader browser and reload validation,
+durable PostgreSQL adapters, actual Anthropic loop, speech, authentication and Aiven deployment.
+These are integration gates, not additions to the Excel parity measurements below.
 
 ## Beta blockers
 
@@ -168,6 +176,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-21 | minor | Existing-app Rust/egui Agentic foundation and future service integration plan; upstream parity estimates unchanged |
 | 2026-10-12 | minor | rows auto-fit oversized fonts on open and whole-row/column formatting (#833) |
 | 2026-10-12 | minor | Page Layout view: dragging margins on the rulers (#792) removed from the §14 remainder |
 | 2026-10-12 | minor | §13: Forecast Sheet Forecast Start (hindcast) landed (#785) |

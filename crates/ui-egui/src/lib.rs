@@ -6,6 +6,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+pub mod agent;
 pub mod backstage;
 mod border_preview;
 mod cell_pictures;
@@ -189,6 +190,9 @@ pub struct Services {
     pub paste_text: Option<Box<dyn FnMut() -> Option<String>>>,
     /// Web: deliver a file to the user (name, bytes).
     pub download: Option<Box<dyn Fn(&str, &[u8])>>,
+    /// Embedded web hosts capture this exact document when exporting XLSX. Delivery alone
+    /// must not mark it saved: the host acknowledges the captured snapshot after persistence.
+    pub download_workbook: Option<Box<dyn Fn(&gridcraft_engine::DocState, &str, &[u8]) -> Result<(), String>>>,
     /// Web: start an asynchronous file pick; the bytes arrive later in `inbox`.
     pub open_async: Option<Box<dyn Fn()>>,
     /// Files delivered asynchronously (name, bytes), opened on the next frame.
@@ -231,6 +235,7 @@ impl Default for Chrome {
 
 pub struct SheetApp {
     pub session: Session,
+    pub agent: agent::State,
     pub ui: UiState,
     /// The window chrome to draw (see [`Chrome`]).
     pub chrome: Chrome,
@@ -291,6 +296,7 @@ impl SheetApp {
     pub fn new(session: Session, services: Services) -> SheetApp {
         SheetApp {
             session,
+            agent: agent::State::default(),
             ui: UiState::default(),
             chrome: Chrome::default(),
             views: HashMap::new(),
@@ -371,6 +377,32 @@ impl SheetApp {
             self.cut_text = if id == "edit.cut" { self.clipboard_text_at_copy.clone() } else { None };
         }
         r
+    }
+
+    /// Deliver an encoded file, retaining its exact workbook identity for an embedding host.
+    pub fn deliver_download(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+        let workbook = name.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("xlsx"));
+        if workbook && let Some(deliver) = &self.services.download_workbook {
+            let doc = self.session.active().ok_or("no workbook open")?;
+            return deliver(doc, name, bytes);
+        }
+        let deliver = self.services.download.as_ref().ok_or("file delivery is unavailable")?;
+        deliver(name, bytes);
+        Ok(())
+    }
+
+    /// A host must not discard or implicitly commit a user's unfinished interaction.
+    pub fn host_busy(&self) -> bool {
+        self.editor.is_some()
+            || self.text_box_editor.is_some()
+            || self.dialog.is_some()
+            || self.name_box.is_some()
+            || self.message.is_some()
+            || self.grid.renaming_tab.is_some()
+            || self.grid.hf_edit.is_some()
+            || self.grid.ruler_drag.is_some()
+            || !matches!(self.grid.drag, grid::Drag::None)
+            || !self.grid.ink.is_empty()
     }
 
     fn run_command(&mut self, id: &str, params: Json) -> Result<Json, String> {
@@ -595,6 +627,9 @@ impl SheetApp {
 
     /// UI-only commands (dialogs, view toggles that aren't saved in the file).
     fn run_ui_command(&mut self, id: &str, p: &Json) -> Option<Result<Json, String>> {
+        if id.starts_with("ui.agent.") {
+            return Some(agent::command(self, id, p));
+        }
         let r = match id {
             "ui.printSettings" => printing::settings(&mut self.printing, p, self.services.printers.as_ref()),
             "ui.printSubmit" => self.submit_print(p.clone()),
@@ -755,11 +790,12 @@ impl SheetApp {
                     }
                 } else if self.services.download.is_some()
                     && let Ok(r) = self.run("file.saveBytes", json!({"format": "xlsx"}))
-                    && let Some(dl) = &self.services.download
                     && let Some(b) = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
                 {
                     let name = r.get("name").and_then(Json::as_str).unwrap_or("Book.xlsx").to_string();
-                    dl(&name, &b);
+                    if let Err(error) = self.deliver_download(&name, &b) {
+                        self.alert(error);
+                    }
                 }
             }
             // File › Options (`file.options`) and the File tab itself open the Backstage view.
@@ -1141,6 +1177,7 @@ impl SheetApp {
         // The language the widgets translate with this frame (see `i18n::current`).
         i18n::set_current(&ctx, self.ui.language);
         let t = theme::Tokens::get(&ctx);
+        agent::observe(self);
         // A host can turn the File tab off while Backstage is already open: close it.
         if !self.chrome.file_tab {
             self.backstage = None;
@@ -1155,6 +1192,7 @@ impl SheetApp {
             // File tab: the Backstage view replaces everything below the title bar.
             backstage::show(self, ui);
         } else {
+            agent::mode_bar(self, ui);
             ribbon::show(self, ui);
             widgets::notice_bar(self, ui);
             if self.session.prefs.formula_bar {
@@ -1166,6 +1204,7 @@ impl SheetApp {
             tabs::sheet_tabs(self, ui);
             pivot_pane::show(self, ui);
             panes::show(self, ui);
+            agent::show(self, ui);
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.grid_bg)).show(ui, |ui| {
                 let g0 = now_ms();
                 grid::show(self, ui);
@@ -1173,6 +1212,7 @@ impl SheetApp {
             });
         }
         dialogs::show(self, &ctx);
+        agent::observe(self);
         widgets::message_box(self, &ctx);
         widgets::toast(self, &ctx);
         control::issue_screenshots(self, &ctx);

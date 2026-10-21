@@ -87,12 +87,6 @@ fn main() {
     } else {
         session.new_workbook();
     }
-    for c in &cmds {
-        let (id, p) = c.split_once('=').map(|(a, b)| (a.to_string(), serde_json::from_str(b).unwrap_or(json!({})))).unwrap_or((c.clone(), json!({})));
-        if let Err(e) = session.execute(&id, p) {
-            eprintln!("{id}: {e}");
-        }
-    }
     let mut harness =
         egui_kittest::Harness::builder().with_size(egui::vec2(size.0, size.1)).with_pixels_per_point(scale).with_max_steps(12).wgpu().build_ui_state(
             move |ui, app: &mut SheetApp| {
@@ -102,6 +96,16 @@ fn main() {
             },
             {
                 let mut app = SheetApp::new(session, Default::default());
+                // UI commands (including the agent workspace) share the same command path.
+                for c in &cmds {
+                    let (id, p) = c
+                        .split_once('=')
+                        .map(|(a, b)| (a.to_string(), serde_json::from_str(b).unwrap_or(json!({}))))
+                        .unwrap_or((c.clone(), json!({})));
+                    if let Err(e) = app.run(&id, p) {
+                        eprintln!("{id}: {e}");
+                    }
+                }
                 app.ui.dark = dark;
                 if let Some(code) = &language
                     && let Some(l) = gridcraft_ui_egui::i18n::Language::parse(code)

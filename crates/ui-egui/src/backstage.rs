@@ -912,12 +912,13 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
         Ok(r) => {
             let bytes = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode);
             let name = r.get("name").and_then(Json::as_str).map_or_else(|| format!("{stem}.{fmt}"), str::to_string);
-            match (bytes, &app.services.download) {
-                (Some(b), Some(dl)) => {
-                    dl(&name, &b);
-                    true
+            match bytes.map(|b| app.deliver_download(&name, &b)) {
+                Some(Ok(())) => true,
+                Some(Err(error)) => {
+                    app.message = Some(("GridCraft".into(), crate::clean_error(&error)));
+                    false
                 }
-                _ => false,
+                None => false,
             }
         }
         Err(e) => {

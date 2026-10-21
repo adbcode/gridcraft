@@ -82,3 +82,10 @@ sibling Craft apps do with `?webgl` / `?cpu`), document them here; they also wor
 iframe `src`.
 
 A browser with neither WebGPU nor WebGL2 gets a message in place of the app.
+
+## Live workbook control and persistence
+
+For an agentic product use `?host=parent` and [bridge protocol 2](../../docs/agentic/bridge-protocol.md).
+It requires correlated open acknowledgements, explicit workbook identity on edits, and exact
+snapshot acknowledgements after durable storage. A plain cross-origin iframe cannot use it.
+See [the fork foundation](../../docs/agentic/README.md) for the native Agentic interface and service contracts.

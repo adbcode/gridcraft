@@ -5,10 +5,37 @@ GridCraft is a clean-room, open-source, Rust-native spreadsheet targeting Micros
 Standards and learnings shared across the crafting apps live in `../../craftrules` (checked out next to the craft apps, or `storytold/craftrules`). Read its `AGENTS.md` at the start of a session, follow its standards, and contribute reusable learnings back there. Never code: repos don't share code.
 
 ## Start every session here
-1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md` and the relevant `plan/architecture.md` section. Behaviour reference: `plan/excel/*.md` (`observed-ui.md` holds measured observations of the running app).
-2. Follow the autonomous operation protocol (`plan/execution-plan.md` §7). Don't stop to ask unless §7 lists the decision as the user's.
+1. For this fork, read [the agentic foundation](docs/agentic/README.md), [delivery plan](docs/agentic/delivery.md) and [validation record](docs/agentic/validation.md). Check the actual branch, worktree and available services before selecting the next task. The user's requested scope takes precedence over automatically picking an upstream parity task.
+2. If present, read `plan/STATUS.md`, the relevant task in `plan/execution-plan.md` and the relevant `plan/architecture.md` section. Follow the autonomous operation protocol in execution-plan §7. Behaviour reference: `plan/excel/*.md` (`observed-ui.md` holds measured observations of the running app).
+3. The initial fork work found neither `plan/` nor `../../craftrules`; the advertised craftrules AGENTS URL also returned 404. Recheck local availability, then use these instructions and committed docs when absent. Do not invent missing instructions or repeatedly block on those optional checkouts.
 
 `plan/` is gitignored (local only).
+
+## This fork: agentic spreadsheet foundation
+
+Turn business records and explicit remembered working rules into an editable spreadsheet.
+The first complete product slice is: use the test-order exclusion rule, compare two defined
+periods, produce a correct editable summary with provenance, verify it, and allow native undo.
+
+- **Architecture:** extend this project's Rust/egui application. Classic and Agentic are layouts of the same `SheetApp` and live engine `Session`; switching modes must retain workbook, pending preview and history. Prefer Rust for service adapters too. Add a trusted backend where browser credentials, durable state or deployment require it; a separate TypeScript shell/repository is not a prerequisite.
+- **Current foundation:** the panel supports deterministic local demo intents, session-only rules, preview/apply/verify/undo and action history. The bounded live-workbook adapter, optional same-origin protocol-2 parent bridge, deterministic sales fixture and in-memory continuation contract are implemented. See validation for what was actually tested.
+- **Not connected:** Anthropic, Aiven PostgreSQL/Runtime and ElevenLabs. The SQL file is a draft, not an applied migration. Never describe the local intent router as a model, session memory as durable storage, or local tests as deployed/provider validation. Keep these limits visible in the interface.
+- **Next delivery order:** local PostgreSQL migrations and transaction/ownership tests; trusted service boundary and one-origin deployment; Anthropic agent loop and durable runs; snapshot upload/ack/reload and interruption recovery; push-to-talk with editable transcript and brief verified TTS. Basic recovery belongs in every stage. Charts, ribbon reduction and realtime speech remain optional.
+- **Agent ownership:** Anthropic interprets requests and selects tools; ElevenLabs only transcribes and synthesizes speech. Typed requests and submitted voice transcripts must enter the same workflow. Keep provider secrets out of browser assets.
+- **Workbook authority:** inspect and mutate the live editor through validated contracts. Check document/sheet/change identity, reject stale results, preserve unfinished manual edits, record actual effects and verify readback. Only promise native last-operation undo; it may undo a manual edit. Database acknowledgement must target the exact exported snapshot and leave later edits dirty.
+- **Data semantics:** use [the documented fixture](docs/agentic/sales-fixture.md) and its expected answers. Rules must be explicitly requested, structurally supported and actually applied to queries. Preserve periods, metric, query ID, rule IDs and row counts. Drill-down describes contributors; aggregates do not prove causes.
+- **Sibling context:** `../artcraft` was inspected as an AI desktop-client reference, not a spreadsheet backend. Its lifecycle/recovery patterns may inform design; do not copy code/assets or carry over editor remounting.
+
+Code map: `crates/ui-egui/src/agent.rs` (panel and UI commands),
+`crates/engine/src/agent_bridge.rs` (identity, bounded edits, receipts, snapshots),
+`crates/engine/src/review_workflow.rs` (sales/rules/run contracts),
+`apps/gridcraft-web/src/host.rs` (parent transport), and `docs/agentic/` (contracts and handoff).
+Keep these docs and this status accurate as real integrations replace the local foundation.
+
+Reusable project skills live in `.agents/skills/`; load the relevant skill when its workflow applies:
+
+- [gridcraft-agentic-workflow](.agents/skills/gridcraft-agentic-workflow/SKILL.md): implement and verify live agent actions, business queries, rules and recovery without losing manual edits.
+- [gridcraft-web-validation](.agents/skills/gridcraft-web-validation/SKILL.md): build native/WASM, inspect rendered UI and validate the actual same-origin browser bridge; includes conditional local toolchain troubleshooting.
 
 ## Assets and iconography — absolute rule
 **No Microsoft, Adobe, Avid, Autodesk (or any other vendor's) iconography, images, artwork, fonts, templates, themes or sample files — ever.** This is the most important rule in this repository; breaking it is a serious failure.

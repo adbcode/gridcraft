@@ -6,6 +6,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+pub mod agent_bridge;
 pub mod catalog;
 pub mod cf;
 mod clip_html;
@@ -18,6 +19,7 @@ pub mod outline;
 pub mod paper;
 pub mod pivot;
 pub mod pivot_calc;
+pub mod review_workflow;
 pub mod sample;
 pub mod selection;
 pub mod tables;

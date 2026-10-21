@@ -1,8 +1,21 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (created from the code on main; supersedes the local-only plan/architecture.md for committed docs) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-21 · **Change:** minor (fork agentic foundation; existing parity assessment unchanged) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
+
+## Fork: agentic spreadsheet foundation
+
+The same-origin web bridge now has correlated loading, bounded live-session inspection and
+mutation, native undo and acknowledged snapshots. The engine adapter tracks workbook identity,
+selection and recalculation independently of the ordinary revision counter. The base Agentic
+interface is a Rust/egui panel in the existing application; Classic/Agentic layouts preserve
+the same engine session. Deterministic fixture queries, validated rule types and run-state
+contracts live in the engine; the panel holds session-only rule and conversation state.
+Future provider/persistence adapters should use Rust where
+practical, with a trusted service added for browser secrets and durable state as needed.
+See [the foundation](agentic/README.md) and
+[protocol 2](agentic/bridge-protocol.md). No live service integration is claimed.
 
 ## Workspace and layering
 
@@ -68,4 +81,5 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-21 | minor | Existing-app Rust/egui Agentic foundation and future service integration plan; upstream parity estimates unchanged |
 | 2026-10-10 | major | Created from the code on main: crates, layers, data flow, agent control, known gaps |

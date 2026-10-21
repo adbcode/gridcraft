@@ -161,6 +161,14 @@ directives, e.g. `RUST_LOG=debug` or `RUST_LOG=warn,gridcraft_engine=debug` (a t
 matches a prefix: `gridcraft*=debug`). Runs with `GRIDCRAFT_NO_PREFS` set (no saved settings)
 log to standard error only.
 
+## Agentic foundation in this fork
+
+The Rust interface has Classic and Agentic modes over the same live workbook. In Agentic
+mode, use the labelled local demo to remember the test-order exclusion rule, preview a
+fixed weekly sales comparison, apply its editable formulas, and undo the last operation.
+Provider calls, persistent memory, business data connections and voice await their services.
+See [setup, scope and next steps](docs/agentic/README.md).
+
 ## For agents: MCP, CLI and the control channel
 
 ```sh

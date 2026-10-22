@@ -86,13 +86,17 @@ data requires a documented source/export and field mapping. Preserve that distin
 interface and the demonstration. Aggregates show the size of changes; contributing records
 support descriptive drill-down, not a causal claim about customer demand.
 
-## Durable typed agent loop to implement next
+## Durable typed agent loop
 
 The Rust backend owns conversation state, outstanding tools, authorization and retry/recovery.
 OpenAI interprets the request and selects bounded tools; it never receives unrestricted SQL or
 engine execution. The existing `RunState` is an in-memory reference, not durable orchestration.
 
-The planned routes below are **not implemented**:
+These routes are implemented (checkpoint 2, `apps/gridcraft-server/src/runs.rs`). Browser tools
+(`get_context`, `inspect_range`, `write_range`, `write_sales_review`, `undo_last`) run in the editor;
+writes wait for Apply against the identity captured with the proposal (`stale_workbook`, `busy`,
+`user_declined`). Server tools: `compare_sales`, `remember_rule`, `list_rules`, `get_query_evidence`,
+`search_files`, `read_attached_file`.
 
 | Endpoint | Responsibility |
 |---|---|
@@ -167,5 +171,6 @@ hour estimate or local green test proves those gates.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | major | Durable runs, mock cloud library and connected browser harness implemented (checkpoint 2) |
 | 2026-10-22 | major | OpenAI-first Rust service, real persistence/evidence baseline and measurable changing-data acceptance before durable agent and voice integration |
 | 2026-10-21 | major | Existing-app Rust/egui interface, optional service boundary and ordered live acceptance gates |

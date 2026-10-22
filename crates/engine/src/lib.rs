@@ -7,10 +7,12 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_bridge;
+pub mod agent_protocol;
 pub mod catalog;
 pub mod cf;
 mod clip_html;
 pub mod cmd;
+pub mod demo_files;
 pub mod display;
 pub mod fill;
 pub mod io;

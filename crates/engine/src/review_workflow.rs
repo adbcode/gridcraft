@@ -214,6 +214,10 @@ impl SalesReview {
         &self.provenance
     }
 
+    pub fn rebuild_from_evidence(records: &[Sale], rules: &[ReviewRule], query_id: &str, periods: ComparisonPeriods) -> ReviewResult<Self> {
+        compare_sales(records, rules, query_id, periods)
+    }
+
     /// Five-column rectangular command payload, anchored at A1. Monetary cells are integer
     /// EUR cents, and generated formulas recalculate if a user edits the summary values.
     /// All external text is forced to literal cell text, including formula-like labels.
@@ -233,6 +237,51 @@ impl SalesReview {
         let last_category_row = total_row.saturating_sub(1);
         let previous = if self.categories.is_empty() { json!(0) } else { json!(format!("=SUM(B2:B{last_category_row})")) };
         let current = if self.categories.is_empty() { json!(0) } else { json!(format!("=SUM(C2:C{last_category_row})")) };
+        rows.push(vec![
+            json!("Total"),
+            previous,
+            current,
+            json!(format!("=C{total_row}-B{total_row}")),
+            json!(format!("=IF(B{total_row}=0,\"n/a\",D{total_row}/B{total_row})")),
+        ]);
+        rows.push(vec![Json::Null; 5]);
+        let p = &self.provenance;
+        let fields = [
+            ("Query", p.query_id.clone()),
+            ("Metric", p.metric_definition.clone()),
+            ("Prior", period_label(p.periods.previous)),
+            ("Current", period_label(p.periods.current)),
+            ("Rules", if p.applied_rule_ids.is_empty() { "none".into() } else { p.applied_rule_ids.join(", ") }),
+            ("Rows", format!("prior: {}; current: {}; source: {}", p.previous_record_count, p.current_record_count, p.source_record_count)),
+            ("Zero", "Growth is fractional; prior zero = n/a, including zero-to-zero".into()),
+            ("Detail", DRILLDOWN_LIMITATION.into()),
+        ];
+        for (label, value) in fields {
+            rows.push(vec![json!(label), literal(&value), Json::Null, Json::Null, Json::Null]);
+        }
+        rows
+    }
+
+    /// The review payload expressed in EUR rather than the engine's integer cents.
+    ///
+    /// This is used by the built-in workbook so that the workbook's visible
+    /// number formats describe the values users edit.
+    pub fn sheet_values_eur(&self) -> Vec<Vec<Json>> {
+        let mut rows = vec![vec![json!("Group"), json!("Prior (EUR)"), json!("Current (EUR)"), json!("Delta (EUR)"), json!("Growth")]];
+        for (index, category) in self.categories.iter().enumerate() {
+            let row = index.saturating_add(2);
+            rows.push(vec![
+                literal(&category.category),
+                json!(category.previous_minor as f64 / 100.0),
+                json!(category.current_minor as f64 / 100.0),
+                json!(format!("=C{row}-B{row}")),
+                json!(format!("=IF(B{row}=0,\"n/a\",D{row}/B{row})")),
+            ]);
+        }
+        let total_row = rows.len().saturating_add(1);
+        let last_category_row = total_row.saturating_sub(1);
+        let previous = if self.categories.is_empty() { json!(0.0) } else { json!(format!("=SUM(B2:B{last_category_row})")) };
+        let current = if self.categories.is_empty() { json!(0.0) } else { json!(format!("=SUM(C2:C{last_category_row})")) };
         rows.push(vec![
             json!("Total"),
             previous,

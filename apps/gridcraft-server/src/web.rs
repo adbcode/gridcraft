@@ -16,10 +16,18 @@ use serde_json::json;
 use tower_http::{services::ServeDir, timeout::TimeoutLayer};
 use uuid::Uuid;
 
-use crate::storage::{SnapshotMetadata, SnapshotUpload, StorageError, Store};
+use gridcraft_engine::agent_protocol::{RunContinue, RunStart};
+
+use crate::{
+    providers::{ElevenLabsClient, MAX_AUDIO_BYTES, ProviderError},
+    runs::{RunError, RunService},
+    storage::{SnapshotMetadata, SnapshotUpload, StorageError, Store},
+};
 
 const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
+/// Spoken outcomes are brief summaries of verified results, not full answers.
+pub const MAX_SPOKEN_BYTES: usize = 600;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,11 +36,26 @@ pub struct AppState {
     pub openai_configured: bool,
     pub speech_configured: bool,
     pub tts_configured: bool,
+    pub runs: Option<RunService>,
+    pub speech: Option<ElevenLabsClient>,
 }
 
 pub fn router(state: AppState) -> Router {
     let assets = ServeDir::new(&state.static_dir).append_index_html_on_directories(true);
     let snapshots = Router::new().route("/api/workbooks/{id}/snapshots", post(upload_snapshot)).layer(DefaultBodyLimit::max(MAX_FILE_BYTES + 65_536));
+    // A run step may make several bounded model calls. An interrupted step is recoverable.
+    let runs = Router::new()
+        .route("/api/runs/start", post(start_run))
+        .route("/api/runs/{id}", get(get_run))
+        .route("/api/runs/{id}/continue", post(continue_run))
+        .route("/api/runs/{id}/resume", post(resume_run))
+        .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(150)));
+    let speech = Router::new()
+        .route("/api/speech/transcribe", post(transcribe))
+        .route("/api/speech/synthesize", post(synthesize))
+        .layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES + 1024))
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(60)));
     Router::new()
         .route("/api/health/live", get(|| async { Json(json!({"status":"alive"})) }))
         .route("/api/health/ready", get(ready))
@@ -42,13 +65,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sales/import", post(import_sales))
         .route("/api/queries/{id}", get(query_evidence))
         .route("/api/workbooks", get(list_workbooks))
+        .route("/api/files", get(list_files))
+        .route("/api/files/{id}/versions/{version}/preview", get(preview_file))
+        .route("/api/workbooks/{id}/snapshots/{version}", get(download_version))
         .route("/api/workbooks/{id}", put(create_workbook))
         .route("/api/workbooks/{id}/snapshots/latest", get(download_snapshot))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .merge(snapshots)
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(30)))
+        .merge(runs)
+        .merge(speech)
         .fallback_service(assets)
         .layer(middleware::from_fn(same_origin))
-        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(30)))
         .with_state(state)
 }
 
@@ -86,7 +114,8 @@ async fn same_origin(request: Request, next: Next) -> Response {
 async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "workspace_mode": "single_mock_user", "authentication": false,
-        "ui_workflow": "offline_demo", "durable_agent_loop": false,
+        "ui_workflow": if state.runs.is_some() { "connected_agent" } else { "offline_demo" },
+        "durable_agent_loop": state.runs.is_some(),
         "database_configured": state.store.is_some(),
         "openai_configured": state.openai_configured,
         "elevenlabs_stt_configured": state.speech_configured,
@@ -154,6 +183,22 @@ async fn list_workbooks(State(state): State<AppState>) -> Result<impl IntoRespon
 }
 
 #[derive(Deserialize)]
+struct FileQuery {
+    q: Option<String>,
+}
+
+async fn list_files(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<FileQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(store(&state)?.list_files(query.q.as_deref().unwrap_or_default()).await?))
+}
+
+async fn preview_file(State(state): State<AppState>, Path((id, version)): Path<(Uuid, i64)>) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(store(&state)?.preview_snapshot(id, version).await?))
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkbookRequest {
     title: String,
@@ -215,7 +260,107 @@ async fn download_snapshot(State(state): State<AppState>, Path(id): Path<Uuid>) 
     Ok((headers, Body::from(snapshot.xlsx)).into_response())
 }
 
+async fn download_version(State(state): State<AppState>, Path((id, version)): Path<(Uuid, i64)>) -> Result<Response, ApiError> {
+    let snapshot = store(&state)?.snapshot(id, version).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+    headers.insert(header::CONTENT_DISPOSITION, axum::http::HeaderValue::from_static("attachment; filename=workbook.xlsx"));
+    headers.insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    Ok((headers, Body::from(snapshot.xlsx)).into_response())
+}
+
+fn runs(state: &AppState) -> Result<&RunService, ApiError> {
+    state.runs.as_ref().ok_or(ApiError(StatusCode::SERVICE_UNAVAILABLE, "agent_not_configured"))
+}
+
+async fn start_run(State(state): State<AppState>, Json(request): Json<RunStart>) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(runs(&state)?.start(request).await?))
+}
+
+async fn get_run(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(runs(&state)?.get(id).await?))
+}
+
+async fn continue_run(State(state): State<AppState>, Path(id): Path<Uuid>, Json(request): Json<RunContinue>) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(runs(&state)?.continue_run(id, request).await?))
+}
+
+async fn resume_run(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(runs(&state)?.resume(id).await?))
+}
+
+impl From<RunError> for ApiError {
+    fn from(error: RunError) -> Self {
+        match error {
+            RunError::NotFound => Self(StatusCode::NOT_FOUND, "run_not_found"),
+            RunError::Conflict => Self(StatusCode::CONFLICT, "conflicting_request"),
+            RunError::Invalid => Self(StatusCode::UNPROCESSABLE_ENTITY, "invalid_or_unsupported_input"),
+            RunError::Unconfigured => Self(StatusCode::SERVICE_UNAVAILABLE, "agent_not_configured"),
+            RunError::Storage => Self(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable"),
+            RunError::Corrupt => Self(StatusCode::INTERNAL_SERVER_ERROR, "stored_data_invalid"),
+        }
+    }
+}
+
 struct ApiError(StatusCode, &'static str);
+
+impl From<ProviderError> for ApiError {
+    fn from(error: ProviderError) -> Self {
+        match error {
+            ProviderError::InputLimit => Self(StatusCode::PAYLOAD_TOO_LARGE, "speech_input_too_large"),
+            ProviderError::InvalidConversation => Self(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_audio_format"),
+            ProviderError::InvalidConfiguration => Self(StatusCode::SERVICE_UNAVAILABLE, "speech_not_configured"),
+            ProviderError::VoiceNotConfigured => Self(StatusCode::SERVICE_UNAVAILABLE, "voice_not_configured"),
+            ProviderError::Rejected { status: 401 | 403 } => Self(StatusCode::BAD_GATEWAY, "provider_rejected_credentials"),
+            ProviderError::Rejected { status: 429 } => Self(StatusCode::SERVICE_UNAVAILABLE, "provider_rate_limited"),
+            ProviderError::Rejected { .. } => Self(StatusCode::BAD_GATEWAY, "provider_rejected"),
+            ProviderError::Timeout => Self(StatusCode::GATEWAY_TIMEOUT, "provider_timeout"),
+            ProviderError::Transport => Self(StatusCode::BAD_GATEWAY, "provider_unavailable"),
+            ProviderError::ResponseLimit | ProviderError::InvalidResponse => Self(StatusCode::BAD_GATEWAY, "provider_invalid_response"),
+        }
+    }
+}
+
+fn speech(state: &AppState) -> Result<&ElevenLabsClient, ApiError> {
+    state.speech.as_ref().ok_or(ApiError(StatusCode::SERVICE_UNAVAILABLE, "speech_not_configured"))
+}
+
+/// Raw audio body with its `content-type`; returns editable text only (never submits a run).
+async fn transcribe(State(state): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Result<impl IntoResponse, ApiError> {
+    let client = speech(&state)?;
+    if body.is_empty() || body.len() > MAX_AUDIO_BYTES {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "audio_size_invalid"));
+    }
+    let mime = headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().replace(' ', "").to_ascii_lowercase();
+    let transcript = client.transcribe(body.to_vec(), &mime).await?;
+    let text: String = transcript
+        .text
+        .trim()
+        .char_indices()
+        .take_while(|(index, ch)| index + ch.len_utf8() <= gridcraft_engine::agent_protocol::MAX_PROMPT_BYTES)
+        .map(|(_, ch)| ch)
+        .collect();
+    Ok(Json(json!({"text": text, "language_code": transcript.language_code})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpeechRequest {
+    text: String,
+}
+
+async fn synthesize(State(state): State<AppState>, Json(request): Json<SpeechRequest>) -> Result<Response, ApiError> {
+    let client = speech(&state)?;
+    let text = request.text.trim();
+    if text.is_empty() || text.len() > MAX_SPOKEN_BYTES {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "spoken_text_length_invalid"));
+    }
+    let audio = client.synthesize(text).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static("audio/mpeg"));
+    headers.insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    Ok((headers, Body::from(audio)).into_response())
+}
 
 impl From<StorageError> for ApiError {
     fn from(error: StorageError) -> Self {
@@ -242,7 +387,15 @@ mod tests {
     use tower::ServiceExt;
 
     fn app(path: PathBuf) -> Router {
-        router(AppState { store: None, static_dir: path, openai_configured: false, speech_configured: false, tts_configured: false })
+        router(AppState {
+            store: None,
+            static_dir: path,
+            openai_configured: false,
+            speech_configured: false,
+            tts_configured: false,
+            runs: None,
+            speech: None,
+        })
     }
 
     #[tokio::test]

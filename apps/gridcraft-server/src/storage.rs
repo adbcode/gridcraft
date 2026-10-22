@@ -2,15 +2,16 @@
 //! browser identities and database versions remain separate. No database error, URL or
 //! query text is returned to clients or included in this module's error messages.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt, time::Duration};
 
 use gridcraft_engine::agent_bridge::Identity;
+use gridcraft_engine::agent_protocol::AttachmentRef;
 use gridcraft_engine::review_workflow::{
     ComparisonPeriods, Currency, MAX_RECORDS, MAX_RULES, ReviewError, ReviewRule, Sale, SaleStatus, SalesReview, compare_sales, demo_sales,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow};
+use sqlx::{Connection, PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction, migrate::MigrateError, postgres::PgRow};
 use uuid::Uuid;
 
 pub const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
@@ -46,14 +47,104 @@ impl From<sqlx::Error> for StorageError {
     }
 }
 
-pub async fn migrate(pool: &PgPool) -> Result<()> {
-    sqlx::migrate!("./migrations").run(pool).await.map_err(|_| StorageError::Migration)
+/// Startup-only diagnostics: never retain driver messages, SQL, identifiers or credentials.
+#[derive(Debug, thiserror::Error)]
+pub struct MigrationError {
+    phase: &'static str,
+    reason: &'static str,
+    version: Option<i64>,
+    sqlstate: Option<String>,
+}
+
+impl fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "database migration failed during {}: {}", self.phase, self.reason)?;
+        if let Some(version) = self.version {
+            write!(f, " (migration {version})")?;
+        }
+        if let Some(code) = &self.sqlstate {
+            write!(f, " (SQLSTATE {code})")?;
+        }
+        Ok(())
+    }
+}
+
+impl MigrationError {
+    fn new(phase: &'static str, reason: &'static str) -> Self {
+        Self { phase, reason, version: None, sqlstate: None }
+    }
+
+    fn database(phase: &'static str, error: sqlx::Error) -> Self {
+        let reason = match &error {
+            sqlx::Error::Tls(_) => "TLS verification failed; check the PostgreSQL hostname and project CA PEM (keep verify-full)",
+            sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                "TLS/protocol negotiation failed; check the PostgreSQL hostname and project CA PEM (keep verify-full)"
+            }
+            sqlx::Error::Io(_) => "network connection failed; check the PostgreSQL host, port, service status and network access",
+            sqlx::Error::Configuration(_) => "invalid database connection configuration; check DATABASE_URL and CA settings",
+            sqlx::Error::PoolTimedOut => "connection timed out; check PostgreSQL connectivity and service limits",
+            sqlx::Error::Database(_) => "PostgreSQL rejected the operation",
+            _ => "database driver failed; check connection settings and migration compatibility",
+        };
+        let mut diagnostic = Self::new(phase, reason);
+        if let Some(code) = error.as_database_error().and_then(|error| error.code()) {
+            diagnostic.set_sqlstate(&code);
+        }
+        diagnostic
+    }
+
+    fn set_sqlstate(&mut self, code: &str) {
+        if code.len() != 5 || !code.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()) {
+            return;
+        }
+        self.sqlstate = Some(code.to_owned());
+        self.reason = match code {
+            "28P01" | "28000" => "authentication rejected; check the PostgreSQL user/password and access policy in DATABASE_URL",
+            "3D000" => "database does not exist; check the database name in DATABASE_URL",
+            "42501" => "insufficient privileges; the migration user needs schema/table creation and migration-lock access",
+            "42P07" | "42710" => "schema object already exists; inspect existing schema and migration history before making changes",
+            "3F000" => "target schema does not exist; check the connection search_path",
+            "53300" => "PostgreSQL connection limit reached; check service capacity and connection usage",
+            "57P03" => "PostgreSQL is not accepting connections; check service status",
+            _ => self.reason,
+        };
+    }
+
+    fn migration(error: MigrateError) -> Self {
+        let (reason, version) = match error {
+            MigrateError::Execute(error) => return Self::database("migration setup/locking", error),
+            MigrateError::ExecuteMigration(error, version) => {
+                let mut diagnostic = Self::database("migration SQL", error);
+                diagnostic.version = Some(version);
+                return diagnostic;
+            }
+            MigrateError::VersionMismatch(version) => {
+                ("applied migration checksum differs from this build; restore the original migration, do not delete history", Some(version))
+            }
+            MigrateError::VersionMissing(version) => {
+                ("database contains a migration missing from this build; deploy the matching migration history", Some(version))
+            }
+            MigrateError::Dirty(version) => ("a migration is marked incomplete; inspect and repair it before restarting", Some(version)),
+            _ => ("migration history or source is incompatible with this build", None),
+        };
+        Self { version, ..Self::new("migration validation", reason) }
+    }
+}
+
+pub async fn migrate(pool: &PgPool) -> std::result::Result<(), MigrationError> {
+    // A direct connection preserves failures that pool retries can mask as timeouts.
+    // Use the same TLS policy, and close on return to release even a failed migration's lock.
+    let mut connection = tokio::time::timeout(Duration::from_secs(10), PgConnection::connect_with(&pool.connect_options()))
+        .await
+        .map_err(|_| MigrationError::new("connection", "connection timed out; check PostgreSQL connectivity and service limits"))?
+        .map_err(|error| MigrationError::database("connection", error))?;
+    sqlx::migrate!("./migrations").run(&mut connection).await.map_err(MigrationError::migration)
 }
 
 #[derive(Clone)]
 pub struct Store {
-    pool: PgPool,
-    workspace_id: Uuid,
+    pub(crate) pool: PgPool,
+    pub(crate) workspace_id: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +153,30 @@ pub struct Workbook {
     pub workbook_id: Uuid,
     pub title: String,
     pub latest_version: i64,
+    pub origin: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileEntry {
+    pub workbook_id: Uuid,
+    pub title: String,
+    pub origin: String,
+    pub latest_version: i64,
+    pub sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FilePreview {
+    pub workbook_id: Uuid,
+    pub version: i64,
+    pub sheets: Vec<FileSheetPreview>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FileSheetPreview {
+    pub name: String,
+    pub cells: Vec<Vec<serde_json::Value>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +298,7 @@ impl Store {
         if changed > 0 {
             self.advance_source_revision(&mut tx).await?;
         }
+        self.seed_mock_workbooks(&mut tx).await?;
         tx.commit().await?;
         Ok(fixture.len())
     }
@@ -369,11 +485,12 @@ impl Store {
         validate_text(title, "workbook title")?;
         let mut tx = self.pool.begin().await?;
         self.lock_workspace(&mut tx).await?;
-        if let Some(row) = sqlx::query("SELECT workbook_id,title,latest_version FROM review_workbooks WHERE workspace_id=$1 AND workbook_id=$2")
-            .bind(self.workspace_id)
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?
+        if let Some(row) =
+            sqlx::query("SELECT workbook_id,title,latest_version,origin FROM review_workbooks WHERE workspace_id=$1 AND workbook_id=$2")
+                .bind(self.workspace_id)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
         {
             let workbook = workbook_from_row(&row)?;
             if workbook.title != title {
@@ -394,12 +511,12 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(Workbook { workbook_id: id, title: title.into(), latest_version: 0 })
+        Ok(Workbook { workbook_id: id, title: title.into(), latest_version: 0, origin: "user".into() })
     }
 
     pub async fn list_workbooks(&self) -> Result<Vec<Workbook>> {
         let rows = sqlx::query(
-            "SELECT workbook_id,title,latest_version FROM review_workbooks WHERE workspace_id=$1 ORDER BY created_at,workbook_id LIMIT $2",
+            "SELECT workbook_id,title,latest_version,origin FROM review_workbooks WHERE workspace_id=$1 ORDER BY created_at,workbook_id LIMIT $2",
         )
         .bind(self.workspace_id)
         .bind(MAX_WORKBOOKS.saturating_add(1))
@@ -409,6 +526,80 @@ impl Store {
             return Err(StorageError::LimitExceeded);
         }
         rows.iter().map(workbook_from_row).collect()
+    }
+
+    pub async fn list_files(&self, query: &str) -> Result<Vec<FileEntry>> {
+        if query.len() > 256 || query.chars().any(char::is_control) {
+            return Err(StorageError::InvalidInput("file search"));
+        }
+        let rows = sqlx::query(
+            "SELECT w.workbook_id,w.title,w.origin,w.latest_version,
+                    encode(s.sha256,'hex') AS sha256
+             FROM review_workbooks w
+             LEFT JOIN review_snapshots s ON s.workspace_id=w.workspace_id
+               AND s.workbook_id=w.workbook_id AND s.snapshot_version=w.latest_version
+             WHERE w.workspace_id=$1 AND w.title ILIKE $2
+             ORDER BY w.created_at,w.workbook_id LIMIT 101",
+        )
+        .bind(self.workspace_id)
+        .bind(format!("%{query}%"))
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.len() > 100 {
+            return Err(StorageError::LimitExceeded);
+        }
+        rows.iter()
+            .map(|row| {
+                Ok(FileEntry {
+                    workbook_id: row.try_get("workbook_id")?,
+                    title: row.try_get("title")?,
+                    origin: row.try_get("origin")?,
+                    latest_version: row.try_get("latest_version")?,
+                    sha256: row.try_get("sha256")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn snapshot(&self, id: Uuid, version: i64) -> Result<StoredSnapshot> {
+        if version <= 0 {
+            return Err(StorageError::InvalidInput("snapshot version"));
+        }
+        let row = sqlx::query("SELECT * FROM review_snapshots WHERE workspace_id=$1 AND workbook_id=$2 AND snapshot_version=$3")
+            .bind(self.workspace_id)
+            .bind(id)
+            .bind(version)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        snapshot_from_row(&row)
+    }
+
+    pub async fn preview_snapshot(&self, id: Uuid, version: i64) -> Result<FilePreview> {
+        let snapshot = self.snapshot(id, version).await?;
+        let (workbook, _) = gridcraft_engine::io::open_bytes("preview.xlsx", &snapshot.xlsx).map_err(|_| StorageError::CorruptData)?;
+        let mut sheets = Vec::new();
+        for sheet in workbook.sheets.iter().take(32) {
+            let mut cells = Vec::new();
+            for row in 0..20 {
+                let mut values = Vec::new();
+                for column in 0..8 {
+                    values.push(
+                        serde_json::to_value(sheet.value(gridcraft_engine::core::CellRef::new(row, column)))
+                            .map_err(|_| StorageError::CorruptData)?,
+                    );
+                }
+                cells.push(values);
+            }
+            sheets.push(FileSheetPreview { name: sheet.name.clone(), cells });
+        }
+        Ok(FilePreview { workbook_id: id, version, sheets })
+    }
+
+    pub async fn attachment_matches(&self, attachment: &AttachmentRef) -> Result<bool> {
+        let id = Uuid::parse_str(&attachment.workbook_id).map_err(|_| StorageError::InvalidInput("attachment workbook ID"))?;
+        let snapshot = self.snapshot(id, attachment.version).await?;
+        Ok(snapshot.receipt.sha256.eq_ignore_ascii_case(&attachment.sha256))
     }
 
     /// The workbook row serializes version allocation. Exact duplicate lookup deliberately
@@ -533,6 +724,42 @@ impl Store {
         }
         rows.iter().map(rule_from_row).collect()
     }
+
+    async fn seed_mock_workbooks(&self, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+        let entries = [
+            (Uuid::from_u128(0x11111111111111111111111111111111), "Weekly Sales.xlsx", gridcraft_engine::demo_files::weekly_sales_xlsx()),
+            (Uuid::from_u128(0x22222222222222222222222222222222), "Quarterly Forecast.xlsx", gridcraft_engine::demo_files::quarterly_forecast_xlsx()),
+            (Uuid::from_u128(0x33333333333333333333333333333333), "Inventory.xlsx", gridcraft_engine::demo_files::inventory_xlsx()),
+        ];
+        for (id, title, bytes) in entries {
+            let bytes = bytes.map_err(|_| StorageError::CorruptData)?;
+            sqlx::query(
+                "INSERT INTO review_workbooks (workspace_id,workbook_id,title,latest_version,origin)
+                 VALUES ($1,$2,$3,1,'mock') ON CONFLICT (workspace_id,workbook_id) DO NOTHING",
+            )
+            .bind(self.workspace_id)
+            .bind(id)
+            .bind(title)
+            .execute(&mut **tx)
+            .await?;
+            let digest = Sha256::digest(&bytes).to_vec();
+            sqlx::query(
+                "INSERT INTO review_snapshots
+                 (workspace_id,workbook_id,snapshot_version,expected_version,export_id,workbook_session_id,exported_identity,xlsx,sha256)
+                 VALUES ($1,$2,1,0,$3,$4,$5,$6,$7) ON CONFLICT (workspace_id,workbook_id,snapshot_version) DO NOTHING",
+            )
+            .bind(self.workspace_id)
+            .bind(id)
+            .bind(format!("mock-seed-{id}"))
+            .bind("mock-seed")
+            .bind(serde_json::json!({"document_id":1,"sheet_index":0,"sheet_name":"Sheet1","change_token":1}))
+            .bind(bytes)
+            .bind(digest)
+            .execute(&mut **tx)
+            .await?;
+        }
+        Ok(())
+    }
 }
 
 fn validate_text(value: &str, field: &'static str) -> Result<()> {
@@ -631,7 +858,12 @@ fn sale_from_row(row: &PgRow) -> Result<Sale> {
 }
 
 fn workbook_from_row(row: &PgRow) -> Result<Workbook> {
-    Ok(Workbook { workbook_id: row.try_get("workbook_id")?, title: row.try_get("title")?, latest_version: row.try_get("latest_version")? })
+    Ok(Workbook {
+        workbook_id: row.try_get("workbook_id")?,
+        title: row.try_get("title")?,
+        latest_version: row.try_get("latest_version")?,
+        origin: row.try_get("origin")?,
+    })
 }
 
 fn snapshot_from_row(row: &PgRow) -> Result<StoredSnapshot> {
@@ -669,6 +901,49 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_diagnostics_discard_driver_secrets() {
+        for error in [
+            sqlx::Error::Tls("private certificate and password".into()),
+            sqlx::Error::Configuration("postgres://private-user:private-password@private-host/private-db".into()),
+            sqlx::Error::Protocol("private server response".into()),
+            sqlx::Error::Io(std::io::Error::other("private network details")),
+            sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "private certificate details")),
+        ] {
+            let diagnostic = MigrationError::database("connection", error);
+            assert!(diagnostic.to_string().contains("database migration failed during connection"));
+            assert!(!format!("{diagnostic} {diagnostic:?}").contains("private"));
+        }
+        let diagnostic = MigrationError::migration(MigrateError::Source("private migration SQL".into()));
+        assert!(!format!("{diagnostic} {diagnostic:?}").contains("private"));
+        let diagnostic = MigrationError::database("connection", sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::InvalidData)));
+        assert!(diagnostic.to_string().contains("TLS/protocol negotiation failed"));
+    }
+
+    #[test]
+    fn migration_diagnostics_identify_history_and_sqlstate_without_raw_messages() {
+        let diagnostic = MigrationError::migration(MigrateError::VersionMismatch(3));
+        assert!(diagnostic.to_string().contains("checksum"));
+        assert!(diagnostic.to_string().contains("migration 3"));
+        let diagnostic = MigrationError::migration(MigrateError::VersionMissing(2));
+        assert!(diagnostic.to_string().contains("missing from this build"));
+        assert!(diagnostic.to_string().contains("migration 2"));
+        let diagnostic = MigrationError::migration(MigrateError::Dirty(1));
+        assert!(diagnostic.to_string().contains("incomplete"));
+        for (code, hint) in [("28P01", "authentication"), ("42501", "privileges"), ("42P07", "already exists"), ("3D000", "database does not exist")]
+        {
+            let mut diagnostic = MigrationError::new("connection", "PostgreSQL rejected the operation");
+            diagnostic.set_sqlstate(code);
+            assert!(diagnostic.to_string().contains(hint));
+            assert!(diagnostic.to_string().contains(code));
+        }
+        for code in ["private", "42\n07", "42p07", "secret\nlog injection"] {
+            let mut diagnostic = MigrationError::new("connection", "PostgreSQL rejected the operation");
+            diagnostic.set_sqlstate(code);
+            assert!(diagnostic.sqlstate.is_none());
+        }
+    }
 
     fn sample_upload() -> SnapshotUpload {
         SnapshotUpload {

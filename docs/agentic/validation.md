@@ -1,6 +1,91 @@
 # Foundation and service validation
 
-> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
+> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: minor
+
+## Workspace migration startup diagnostics — 2026-10-22
+
+The diagnostics port targets `feat/agentic-workspace` and preserves its migration
+versions 1 and 2 unchanged. Regression coverage checks the version 1 → 2 upgrade and
+repeat startup, schema conflicts and lock release, checksum mismatch without rewriting
+history, and missing-database diagnostics without disclosing its name. Unit tests cover
+fixed safe messages, SQLSTATE filtering and migration-version reporting.
+
+Observed verification on this branch used a fresh, explicitly disposable local
+PostgreSQL 14 database (`gridcraft_workspace_diagnostics_test`) over the Unix socket;
+the connected-branch database and Aiven were not used.
+
+- `cargo test --locked -p gridcraft-server --lib storage::tests::migration_diagnostics`:
+  2 passed.
+- `cargo test --locked -p gridcraft-server --test migrations_postgres -- --ignored
+  --test-threads=1`: 4 passed, covering migration versions `[1, 2]`, repeat startup,
+  conflict/lock recovery, immutable checksum history and safe missing-database errors.
+- `make check`: formatting, server check and strict clippy passed.
+- `cargo test --locked -p gridcraft-server`: 26 passed; 10 opt-in PostgreSQL tests
+  were ignored in this provider-free run.
+- `make test-db`: all 10 opt-in PostgreSQL tests passed against the fresh local
+  database, including migration diagnostics and the server storage/service tests.
+- `cargo xtask ci`: all 8 repository gate steps passed, including WASM.
+
+No production root cause or successful Aiven deployment is claimed. The supplied
+database inspection showed no migration-history table and allowed public-schema
+creation for the query-editor role; Runtime's database/role, connection and TLS settings
+still require verification. Retain `verify-full` and inspect the diagnostic startup log
+before altering database history. Correcting the container asset path to `/app/web`
+addresses a separate readiness/static-serving issue, not migration startup.
+
+## Voice (checkpoint 4) — 2026-10-22
+
+- Composer microphone (connected mode with ElevenLabs STT): browser `getUserMedia` +
+  `MediaRecorder`, Stop transcribes, Cancel discards (a late recording is ignored), recordings stop
+  after 60 s. The transcript replaces the draft for editing and is never auto-submitted; Send uses
+  the same `/api/runs/start` path as typed text.
+- Only voice-originated runs are spoken, and only after the run completes: the first sentence
+  (at most 280 characters) is synthesized and played, with Play/Stop controls for replay.
+- Tests: `speech_fake_elevenlabs` (2: trimmed transcript, empty/unsupported audio rejected; bounded
+  synthesis, missing voice → 503) and 2 UI tests (voice → editable draft → typed path → spoken
+  outcome; typed requests never spoken; cancelled recording ignored).
+- Live ElevenLabs smoke against the local service: **blocked by the provider account**. Both
+  speech-to-text and text-to-speech returned HTTP 401 `detected_unusual_activity` ("Free Tier access
+  has been disabled ... upgrade to a paid subscription"); the service mapped it to 502
+  `provider_rejected_credentials` and the UI keeps the draft/written answer. Oversized synthesis
+  text → 422 was confirmed live. A working ElevenLabs key is still required for the voice gate.
+
+## Save receipts and reload recovery (checkpoint 3) — 2026-10-22
+
+- Agentic **Save** (`ui.agent.save`, connected mode): registers a workbook UUID on first save,
+  captures one bridge snapshot, exports those exact bytes, uploads them with the expected version
+  and marks the document saved only after the committed receipt (matching export ID, identity and
+  workbook) and the editor's acknowledgement of that capture. Later edits stay unsaved.
+- Network failure re-sends the identical export (same export ID, metadata and bytes); HTTP 409
+  reports a version conflict and leaves the workbook edited.
+- The workbook binding, run ID and session ID persist in browser storage. On reload the editor
+  downloads the latest committed version, opens it through the normal loader, waits for that
+  correlated open before agent actions are enabled, then fetches the stored run (interrupted runs
+  offer Retry → resume).
+- UI tests: 16 passed (3 new: receipt/ack with later edits kept; identical retry then conflict;
+  reload recovery then run). Live service contract checked with curl against the local service:
+  receipt fields, exact retry 200, stale expected version 409, latest download version/SHA headers.
+
+## Connected harness (checkpoint 2) — 2026-10-22
+
+- `cargo xtask ci`: all 8 steps passed (fmt, clippy, test, assets, layers, wasm, parity, keytips).
+- Disposable PostgreSQL (`GRIDCRAFT_TEST_DATABASE_URL`): 7 ignored DB tests passed, including
+  `runs_fake_openai` (local fake Chat Completions server: start → `compare_sales` →
+  `write_sales_review` plan → continue → completed with 1 action; request-ID replay and 409 on a
+  different body; exact continue replay without a second receipt; 409 for a different outcome or
+  tool call ID; stale run → interrupted → resume; `remember_rule` then current total €155.00; mock
+  file listing and bounded preview).
+- `gridcraft-ui-egui --test agent_workspace`: 13 passed, 7 of them connected mode against a scripted
+  `AgentApi`: manual edit → Apply → `stale_workbook` with the edit kept; busy editor → `busy` with the
+  draft kept; Discard → `user_declined`; verified write and action count = completed receipts;
+  network failure retries the identical body (3 attempts) then offers Retry; file search, attach and
+  unsupported formats.
+- Live provider smoke (local service, local database, configured OpenAI model): compare €150.00 →
+  €655.00 with a sourced `sales_query`; "Remember to exclude test orders" saved as a rule; compare
+  again €150.00 → €155.00. The model needed `OPENAI_REASONING_EFFORT=none`: without it, Chat
+  Completions returned HTTP 400 (`invalid_request_error`, param `reasoning_effort`) for function tools.
+- Known pre-existing issue: `cargo clippy --target wasm32-unknown-unknown -p gridcraft-web` reports
+  `backstage.rs` dead variants and a `desktop_theme.rs` lint, which are unchanged from the baseline.
 
 ## Service baseline — 2026-10-22
 
@@ -159,12 +244,16 @@ The web build still reports the pre-existing unused `Modified::At`/`Unknown` var
 - Aiven PostgreSQL TLS/connectivity and real-instance migrations; durable run receipts.
 - OpenAI tool lifecycle with actual provider failures and model availability.
 - Snapshot upload acknowledgement and restoration after browser reload using persisted bytes.
-- ElevenLabs STT/TTS, microphone permission, editable transcript and truthful spoken completion.
+- Microphone permission prompts across browsers (Safari `audio/mp4`) in a real browser session.
 - Release-mode artifact, broader platform testing and the repository's full CI gate.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Workspace-branch startup diagnostic coverage and explicit Aiven verification limits |
+| 2026-10-22 | major | Checkpoint 4 bounded speech routes, browser recording and verified spoken outcomes |
+| 2026-10-22 | major | Checkpoint 3 save receipts, exact retry/conflict and reload recovery |
+| 2026-10-22 | major | Checkpoint 2 durable runs, fake-provider/DB/UI tests and live OpenAI smoke |
 | 2026-10-22 | major | Rust service/configuration/provider checks, unchanged workbook contracts and explicit database/container/live integration gates |
 | 2026-10-21 | major | Offline engine/UI checks, actual browser bridge evidence and explicit live-service limits |

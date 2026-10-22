@@ -10,6 +10,9 @@ use crate::SheetApp;
 use crate::icons::{self, Icon};
 use crate::theme::{self, Tokens};
 
+pub const SHEET_TABS_HEIGHT: f32 = 32.0;
+pub const STATUS_BAR_HEIGHT: f32 = 26.0;
+
 /// The rename field asks for focus only while it has not got it yet. Asking again on the frame it lost focus (Enter or a click elsewhere)
 /// would keep the field focused after it is closed, so the keyboard stayed stuck in the sheet name.
 fn rename_needs_focus(has_focus: bool, lost_focus: bool) -> bool {
@@ -37,7 +40,7 @@ fn activate_sheet(app: &mut SheetApp, i: usize) {
 
 pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
-    egui::Panel::bottom("sheet_tabs").exact_size(32.0).frame(egui::Frame::NONE.fill(t.tab_bar)).show(ui, |ui| {
+    egui::Panel::bottom("sheet_tabs").exact_size(SHEET_TABS_HEIGHT).frame(egui::Frame::NONE.fill(t.tab_bar)).show(ui, |ui| {
         let rect = ui.max_rect();
         ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, t.ribbon_border));
         ui.horizontal_centered(|ui| {
@@ -226,9 +229,10 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
 
 pub fn status_bar(app: &mut SheetApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
-    egui::Panel::bottom("status_bar").exact_size(26.0).frame(egui::Frame::NONE.fill(t.status_bar).inner_margin(egui::Margin::symmetric(12, 0))).show(
-        ui,
-        |ui| {
+    egui::Panel::bottom("status_bar")
+        .exact_size(STATUS_BAR_HEIGHT)
+        .frame(egui::Frame::NONE.fill(t.status_bar).inner_margin(egui::Margin::symmetric(12, 0)))
+        .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 let mode = match app.session.mode {
                     gridcraft_engine::Mode::Ready => "Ready",
@@ -334,8 +338,7 @@ pub fn status_bar(app: &mut SheetApp, ui: &mut Ui) {
                     }
                 });
             });
-        },
-    );
+        });
 }
 
 #[cfg(test)]

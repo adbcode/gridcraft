@@ -4,5 +4,6 @@
 
 pub mod config;
 pub mod providers;
+pub mod runs;
 pub mod storage;
 pub mod web;

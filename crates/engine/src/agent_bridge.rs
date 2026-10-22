@@ -52,7 +52,8 @@ pub struct Identity {
     pub change_token: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Context {
     pub identity: Identity,
     pub selection: String,

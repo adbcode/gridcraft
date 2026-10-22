@@ -51,6 +51,9 @@ pub struct OpenAiConfig {
     /// API root including any version prefix, e.g. https://api.openai.com/v1.
     pub base_url: String,
     pub model: String,
+    /// Optional `reasoning_effort` request field. Some reasoning models only
+    /// accept function tools on chat completions when this is `none`.
+    pub reasoning_effort: Option<String>,
 }
 
 pub struct ElevenLabsConfig {
@@ -113,6 +116,7 @@ pub struct OpenAiClient {
     client: Client,
     endpoint: Url,
     model: String,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAiClient {
@@ -122,11 +126,16 @@ impl OpenAiClient {
 
     fn with_timeout(config: OpenAiConfig, timeout: Duration) -> Result<Self, ProviderError> {
         validate_model(&config.model)?;
+        if let Some(effort) = &config.reasoning_effort
+            && (effort.is_empty() || effort.len() > 16 || !effort.bytes().all(|byte| byte.is_ascii_lowercase()))
+        {
+            return Err(ProviderError::InvalidConfiguration);
+        }
         let root = api_root(&config.base_url)?;
         let endpoint = root.join("chat/completions").map_err(|_| ProviderError::InvalidConfiguration)?;
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, secret_header(&config.api_key, true)?);
-        Ok(Self { client: http_client(headers, timeout)?, endpoint, model: config.model })
+        Ok(Self { client: http_client(headers, timeout)?, endpoint, model: config.model, reasoning_effort: config.reasoning_effort })
     }
 
     pub async fn complete(&self, messages: &[ChatMessage], tools: &[ToolDefinition]) -> Result<Completion, ProviderError> {
@@ -146,6 +155,9 @@ impl OpenAiClient {
         // Avoid provider-specific sampling or token-limit fields in the minimum
         // compatibility path. The model and API root are deployment choices.
         let mut request = json!({"model": self.model, "messages": messages});
+        if let Some(effort) = &self.reasoning_effort {
+            request["reasoning_effort"] = Value::String(effort.clone());
+        }
         if !wire_tools.is_empty() {
             request["tools"] = Value::Array(wire_tools);
             request["parallel_tool_calls"] = Value::Bool(false);
@@ -468,7 +480,12 @@ mod tests {
         }
 
         fn chat(&self) -> Result<OpenAiClient, ProviderError> {
-            OpenAiClient::new(OpenAiConfig { api_key: "test-only-secret".to_owned(), base_url: self.root.clone(), model: "test-model".to_owned() })
+            OpenAiClient::new(OpenAiConfig {
+                api_key: "test-only-secret".to_owned(),
+                base_url: self.root.clone(),
+                model: "test-model".to_owned(),
+                reasoning_effort: None,
+            })
         }
 
         fn speech(&self) -> Result<ElevenLabsClient, ProviderError> {
@@ -631,7 +648,12 @@ mod tests {
         ))
         .await?;
         let client = OpenAiClient::with_timeout(
-            OpenAiConfig { api_key: "test-only-secret".to_owned(), base_url: server.root.clone(), model: "test-model".to_owned() },
+            OpenAiConfig {
+                api_key: "test-only-secret".to_owned(),
+                base_url: server.root.clone(),
+                model: "test-model".to_owned(),
+                reasoning_effort: None,
+            },
             Duration::from_millis(25),
         )?;
         assert_eq!(client.complete(&[ChatMessage::User("Hello".to_owned())], &[]).await, Err(ProviderError::Timeout));

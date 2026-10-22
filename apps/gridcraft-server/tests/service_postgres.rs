@@ -97,6 +97,8 @@ async fn service_persists_review_evidence_and_acknowledges_exact_workbook_upload
         openai_configured: false,
         speech_configured: false,
         tts_configured: false,
+        runs: None,
+        speech: None,
     });
     let ready = get(&app, "/api/health/ready").await?;
     assert_eq!(ready.status(), StatusCode::OK);

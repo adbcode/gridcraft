@@ -294,10 +294,27 @@ fn main() -> eframe::Result<()> {
     {
         log::warn!("sample {s}: {e}");
     }
+    let default_result = if sample.is_none() && files.is_empty() {
+        match gridcraft_engine::demo_files::weekly_sales_xlsx() {
+            Ok(bytes) => {
+                let encoded = gridcraft_engine::io::base64_encode(&bytes);
+                session.execute("file.open", json!({"name": "Weekly Sales.xlsx", "base64": encoded})).ok()
+            }
+            Err(error) => {
+                log::error!("couldn't build the default workbook: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     if session.documents().is_empty() {
         session.new_workbook();
     }
     let mut app = SheetApp::new(session, services());
+    if let Some(result) = default_result {
+        app.after_open(None, &result);
+    }
     app.watch_desktop_theme();
     app.after_engine(); // Show warnings from the sample.
     let control_port = control_port;

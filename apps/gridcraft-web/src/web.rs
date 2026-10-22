@@ -37,17 +37,35 @@ pub fn start() {
                     let inbox: Inbox = Inbox::default();
                     let mut session = Session::new();
                     // In host mode the parent sends the workbook to edit; no sample meanwhile.
-                    let q = if app_bridge.is_some() { String::new() } else { query() };
-                    if let Some(name) = q.split(['?', '&']).find_map(|kv| kv.strip_prefix("sample=")) {
+                    let sample = if app_bridge.is_some() { None } else { query_param("sample") };
+                    if let Some(name) = sample.as_deref().filter(|name| !name.is_empty()) {
                         let _ = session.execute("file.new", serde_json::json!({"sample": name}));
-                    } else if q.contains("sample") {
+                    } else if sample.is_some() {
                         let _ = session.execute("file.new", serde_json::json!({"sample": "sales"}));
                     }
+                    let default_open = app_bridge.is_none() && sample.is_none();
+                    let default_result = if default_open {
+                        match gridcraft_engine::demo_files::weekly_sales_xlsx() {
+                            Ok(bytes) => {
+                                let encoded = gridcraft_engine::io::base64_encode(&bytes);
+                                session.execute("file.open", serde_json::json!({"name": "Weekly Sales.xlsx", "base64": encoded})).ok()
+                            }
+                            Err(error) => {
+                                log::error!("couldn't build the default workbook: {error}");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone());
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, cc.egui_ctx.clone());
                     }
                     let mut app = SheetApp::new(session, services);
+                    if let Some(result) = default_result {
+                        app.after_open(None, &result);
+                    }
                     app.ui.system_theme = true;
                     // Follow the browser's language, except a CJK one: the web build has no system
                     // CJK fonts (none are bundled), so that interface would render as tofu.
@@ -130,7 +148,9 @@ impl eframe::App for WebShell {
 fn services(inbox: Inbox, ctx: egui::Context) -> Services {
     let open_inbox = inbox.clone();
     let picture_ctx = ctx.clone();
+    let agent_ctx = ctx.clone();
     Services {
+        agent_api: Some(Box::new(crate::agent_http::HttpAgentApi::new(agent_ctx))),
         copy_html: Some(Box::new(copy_html)),
         open_async: Some(Box::new(move || {
             let inbox = open_inbox.clone();

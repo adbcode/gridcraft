@@ -116,7 +116,7 @@ fn unfinished_editor_draft_is_preserved_and_blocks_apply_and_undo() {
 }
 
 #[test]
-fn rendered_mode_toggle_and_demo_buttons_drive_the_command_workflow() {
+fn rendered_mode_toggle_and_suggestion_chip_drives_the_command_workflow() {
     use egui_kittest::kittest::Queryable;
     let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 1000.0)).build_ui_state(
         |ui, app: &mut SheetApp| {
@@ -130,9 +130,9 @@ fn rendered_mode_toggle_and_demo_buttons_drive_the_command_workflow() {
     harness.get_by_label("Agentic").click();
     harness.run_steps(2);
     assert!(harness.state().agent.enabled);
-    harness.get_by_label("Remember: exclude test orders").click();
+    harness.get_by_label("Remember to exclude test orders").click();
     harness.run_steps(2);
-    harness.get_by_label("Compare demo sales").click();
+    harness.state_mut().run("ui.agent.submit", json!({"text":"Compare sales"})).unwrap();
     harness.run_steps(2);
     assert_eq!(harness.state().agent.preview.as_ref().unwrap().review.total().current_minor, 15_500);
     harness.get_by_label("Apply to workbook").click();

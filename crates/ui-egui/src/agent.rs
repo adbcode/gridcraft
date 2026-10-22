@@ -22,6 +22,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.agent.discard", "Discard Sales Preview", "{}; leaves workbook unchanged"),
     ("ui.agent.dismiss", "Dismiss Agent Response", "{}; refuses while a preview or error is unresolved"),
     ("ui.agent.expand", "Expand Agent Composer", "{on?: bool}; expand or collapse the composer"),
+    ("ui.agent.rules", "Show Agent Rules", "{open?: bool}; open or close remembered rules"),
+    ("ui.agent.files", "Show Agent Files", "{open?: bool}; open or close the cloud files placeholder"),
 ];
 
 #[derive(Clone, Debug)]
@@ -50,6 +52,8 @@ pub struct State {
     pub card_visible: bool,
     pub error: Option<String>,
     pub composer_expanded: bool,
+    pub rules_open: bool,
+    pub files_open: bool,
     bridge: BridgeState,
     next_id: u64,
     last_range: Option<String>,
@@ -150,6 +154,14 @@ fn execute(state: &mut State, app: &mut SheetApp, id: &str, params: &Json) -> Re
         "ui.agent.expand" => {
             state.composer_expanded = params.get("on").and_then(Json::as_bool).unwrap_or(!state.composer_expanded);
             Ok(json!({"expanded": state.composer_expanded}))
+        }
+        "ui.agent.rules" => {
+            state.rules_open = params.get("open").and_then(Json::as_bool).unwrap_or(!state.rules_open);
+            Ok(json!({"open": state.rules_open}))
+        }
+        "ui.agent.files" => {
+            state.files_open = params.get("open").and_then(Json::as_bool).unwrap_or(!state.files_open);
+            Ok(json!({"open": state.files_open}))
         }
         _ => Err(format!("unknown agent command {id}")),
     }
@@ -324,138 +336,6 @@ pub fn mode_bar(app: &mut SheetApp, ui: &mut egui::Ui) {
     );
 }
 
-#[allow(dead_code)]
-fn legacy_show(app: &mut SheetApp, ui: &mut egui::Ui) {
-    if !app.agent.enabled {
-        return;
-    }
-    let t = Tokens::get(ui.ctx());
-    let max_width = (ui.available_width() * 0.55).max(240.0);
-    egui::Panel::right("agent_workspace")
-        .default_size(370.0)
-        .min_size(240.0)
-        .max_size(max_width)
-        .resizable(true)
-        .frame(egui::Frame::NONE.fill(t.ribbon).inner_margin(14))
-        .show(ui, |ui| {
-            ui.heading("Business review");
-            ui.label(egui::RichText::new("LOCAL DEMO").small().strong().color(t.accent));
-            ui.label("Synthetic sales. Deterministic requests.");
-            ui.label(egui::RichText::new("AI, database memory and voice are not connected.").small().color(t.text_dim));
-            ui.separator();
-            egui::ScrollArea::vertical().id_salt("agent_content").show(ui, |ui| {
-                ui.label(egui::RichText::new("Working rule").strong());
-                if app.agent.rules.is_empty() {
-                    ui.label("No rule remembered.");
-                    if ui.button("Remember: exclude test orders").clicked() {
-                        invoke(app, "ui.agent.remember", json!({}));
-                    }
-                } else {
-                    ui.label(egui::RichText::new("Enabled: exclude test orders").color(t.accent));
-                    ui.label(egui::RichText::new("Session only | lost on restart").small().color(t.text_dim));
-                }
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Request").strong());
-                let mut draft = app.agent.prompt.clone();
-                let response = ui.add(
-                    egui::TextEdit::multiline(&mut draft)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY)
-                        .char_limit(MAX_PROMPT_BYTES)
-                        .hint_text("Compare sales\nRemember to exclude test orders"),
-                );
-                if response.changed() {
-                    invoke(app, "ui.agent.prompt", json!({"text":draft}));
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Send request").clicked() {
-                        invoke(app, "ui.agent.submit", json!({}));
-                    }
-                    if ui.button("Compare demo sales").clicked() {
-                        invoke(app, "ui.agent.compare", json!({}));
-                    }
-                });
-                if let Some(preview) = app.agent.preview.clone() {
-                    ui.add_space(10.0);
-                    egui::Frame::NONE.fill(t.accent_soft).inner_margin(10).corner_radius(6).show(ui, |ui| {
-                        ui.label(egui::RichText::new("Proposed summary").strong());
-                        ui.label("5-12 Oct vs 12-19 Oct 2026 | UTC");
-                        ui.label(egui::RichText::new("Full weeks; end dates excluded. EUR after refunds, paid orders only.").small());
-                        for category in preview.review.categories() {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(egui::RichText::new(&category.category).strong());
-                                ui.label(format!("{} to {}", euros(category.previous_minor), euros(category.current_minor)));
-                            });
-                        }
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Total {} to {}",
-                                euros(preview.review.total().previous_minor),
-                                euros(preview.review.total().current_minor)
-                            ))
-                            .strong(),
-                        );
-                        ui.separator();
-                        let p = preview.review.provenance();
-                        ui.label(format!(
-                            "Source: {} synthetic orders; qualifying {} then {}.",
-                            p.source_record_count, p.previous_record_count, p.current_record_count
-                        ));
-                        ui.label(format!("Rules: {}", if p.applied_rule_ids.is_empty() { "none".into() } else { p.applied_rule_ids.join(", ") }));
-                        ui.label(egui::RichText::new(format!("Query: {}", p.query_id)).small());
-                        ui.label(format!(
-                            "Replace {}!{} with editable cells and provenance. Amount cells use EUR cents.",
-                            preview.expected.sheet_name, preview.range
-                        ));
-                        if app.agent.preview_stale {
-                            ui.colored_label(t.danger, "Workbook changed. Compare again before applying.");
-                        }
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.add_enabled(!app.agent.preview_stale && !app.host_busy(), egui::Button::new("Apply to workbook")).clicked() {
-                                invoke(app, "ui.agent.apply", json!({}));
-                            }
-                            if ui.button("Discard preview").clicked() {
-                                invoke(app, "ui.agent.discard", json!({}));
-                            }
-                        });
-                    });
-                }
-                ui.add_space(8.0);
-                let can_undo = app.session.active().is_some_and(|doc| !doc.undo.is_empty()) && !app.host_busy();
-                if ui.add_enabled(can_undo, egui::Button::new("Undo last operation")).clicked() {
-                    invoke(app, "ui.agent.undo", json!({}));
-                }
-                ui.label(egui::RichText::new("Undo can include your latest manual edit.").small().color(t.text_dim));
-                if let Some(status) = &app.agent.status {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new(status).color(t.text_dim));
-                }
-                ui.separator();
-                ui.label(egui::RichText::new("Conversation").strong());
-                if app.agent.messages.is_empty() {
-                    ui.label("Remember a working rule, then compare the demo sales.");
-                }
-                for message in &app.agent.messages {
-                    ui.label(egui::RichText::new(if message.from_user { "You" } else { "Local demo" }).small().strong().color(t.text_dim));
-                    ui.label(&message.text);
-                    ui.add_space(5.0);
-                }
-                if !app.agent.receipts.is_empty() {
-                    ui.collapsing("Action history", |ui| {
-                        for receipt in &app.agent.receipts {
-                            let action = if receipt.get("action").and_then(Json::as_str) == Some("undo") { "Undo" } else { "Apply summary" };
-                            let range = receipt.pointer("/result/readback/range").and_then(Json::as_str).unwrap_or("workbook");
-                            let verified = receipt.get("verified").and_then(Json::as_bool).unwrap_or_else(|| {
-                                receipt.pointer("/result/readback").is_some() && receipt.pointer("/result/verification_error").is_none()
-                            });
-                            ui.label(format!("{action} | {range} | {}", if verified { "checked" } else { "needs review" }));
-                        }
-                    });
-                }
-            });
-        });
-}
-
 /// Compact chrome for Agentic mode; it does not own the workbook or session.
 pub fn header(app: &mut SheetApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
@@ -479,19 +359,11 @@ pub fn header(app: &mut SheetApp, ui: &mut egui::Ui) {
                         invoke(app, "ui.agent.undo", json!({}));
                     }
                     if ui.button("Rules").clicked() {
-                        egui::Window::new("Rules").auto_sized().show(ui.ctx(), |ui| {
-                            if app.agent.rules.is_empty() {
-                                ui.label("No rule remembered.");
-                                if ui.button("Remember: exclude test orders").clicked() {
-                                    invoke(app, "ui.agent.remember", json!({}));
-                                }
-                            } else {
-                                ui.label("Enabled: exclude test orders");
-                                ui.label("Session only | lost on restart");
-                            }
-                        });
+                        invoke(app, "ui.agent.rules", json!({}));
                     }
-                    ui.add_enabled(false, egui::Button::new("Files"));
+                    if ui.button("Files").clicked() {
+                        invoke(app, "ui.agent.files", json!({}));
+                    }
                 });
             });
         },
@@ -505,10 +377,50 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     }
     let ctx = ui.ctx().clone();
     let t = Tokens::get(&ctx);
+    if app.agent.rules_open {
+        egui::Window::new("Rules").show(&ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Remembered rules").strong());
+                if ui.button("Close").clicked() {
+                    invoke(app, "ui.agent.rules", json!({"open": false}));
+                }
+            });
+            ui.separator();
+            if app.agent.rules.is_empty() {
+                ui.label("No rule remembered.");
+                if ui.button("Remember: exclude test orders").clicked() {
+                    invoke(app, "ui.agent.remember", json!({}));
+                }
+            } else {
+                ui.label(egui::RichText::new("Enabled: exclude test orders").color(t.accent));
+                ui.label(egui::RichText::new("Session only | lost on restart").small().color(t.text_dim));
+            }
+        });
+    }
+    if app.agent.files_open {
+        egui::Window::new("Files").show(&ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Files").strong());
+                if ui.button("Close").clicked() {
+                    invoke(app, "ui.agent.files", json!({"open": false}));
+                }
+            });
+            ui.separator();
+            ui.label("Cloud library arrives in the next checkpoint");
+        });
+    }
     if app.agent.card_visible && (!app.agent.messages.is_empty() || app.agent.preview.is_some() || app.agent.error.is_some()) {
         egui::Area::new("agent_response_card".into()).anchor(egui::Align2::CENTER_TOP, [0.0, 42.0]).show(&ctx, |ui| {
-            egui::Frame::NONE.fill(t.ribbon).inner_margin(12).corner_radius(8).show(ui, |ui| {
-                ui.set_max_width(620.0);
+            let frame = egui::Frame {
+                inner_margin: egui::Margin::same(12),
+                fill: t.ribbon,
+                stroke: egui::Stroke::new(1.0, t.ribbon_border),
+                corner_radius: 8.into(),
+                outer_margin: egui::Margin::ZERO,
+                shadow: egui::Shadow { offset: [0, 2], blur: 8, spread: 1, color: t.shadow },
+            };
+            frame.show(ui, |ui| {
+                ui.set_width(596.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Agent response").strong());
                     if ui.button("×").clicked() {
@@ -516,17 +428,23 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                     }
                 });
                 if let Some(message) = app.agent.messages.last() {
-                    ui.label(&message.text);
+                    ui.add(egui::Label::new(&message.text).wrap());
                 }
                 ui.collapsing("Sources", |ui| {
-                    ui.label("Synthetic demo sales");
+                    ui.add(egui::Label::new("Synthetic demo sales").wrap());
                     if let Some(preview) = &app.agent.preview {
                         let p = preview.review.provenance();
-                        ui.label(format!("Query: {} | {} / {} records", p.query_id, p.previous_record_count, p.current_record_count));
-                        ui.label(format!(
-                            "Rules applied: {}",
-                            if p.applied_rule_ids.is_empty() { "none".into() } else { p.applied_rule_ids.join(", ") }
-                        ));
+                        ui.add(
+                            egui::Label::new(format!("Query: {} | {} / {} records", p.query_id, p.previous_record_count, p.current_record_count))
+                                .wrap(),
+                        );
+                        ui.add(
+                            egui::Label::new(format!(
+                                "Rules applied: {}",
+                                if p.applied_rule_ids.is_empty() { "none".into() } else { p.applied_rule_ids.join(", ") }
+                            ))
+                            .wrap(),
+                        );
                     }
                 });
                 if !app.agent.receipts.is_empty() {
@@ -557,21 +475,45 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                     });
                 }
                 if let Some(error) = &app.agent.error {
-                    ui.colored_label(t.danger, error);
+                    ui.add(egui::Label::new(egui::RichText::new(error).color(t.danger)).wrap());
                 }
             });
         });
     }
-    egui::Area::new("agent_composer".into()).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -34.0]).show(&ctx, |ui| {
-        egui::Frame::NONE.fill(t.window).inner_margin(8).corner_radius(10).show(ui, |ui| {
+    let bottom_offset = crate::tabs::SHEET_TABS_HEIGHT + crate::tabs::STATUS_BAR_HEIGHT + 8.0;
+    egui::Area::new("agent_composer".into()).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -bottom_offset]).show(&ctx, |ui| {
+        let frame = egui::Frame {
+            inner_margin: egui::Margin::same(8),
+            fill: t.window,
+            stroke: egui::Stroke::new(1.0, t.ribbon_border),
+            corner_radius: 10.into(),
+            outer_margin: egui::Margin::ZERO,
+            shadow: egui::Shadow { offset: [0, 2], blur: 8, spread: 1, color: t.shadow },
+        };
+        frame.show(ui, |ui| {
+            ui.set_width(544.0);
+            if app.agent.messages.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Compare sales").clicked() {
+                        invoke(app, "ui.agent.prompt", json!({"text": "Compare sales"}));
+                        invoke(app, "ui.agent.submit", json!({}));
+                    }
+                    if ui.button("Remember to exclude test orders").clicked() {
+                        invoke(app, "ui.agent.prompt", json!({"text": "Remember to exclude test orders"}));
+                        invoke(app, "ui.agent.submit", json!({}));
+                    }
+                });
+                ui.add_space(4.0);
+            }
             ui.horizontal(|ui| {
-                ui.add_enabled(false, egui::Button::new("＋"));
+                let attach = ui.add_enabled(false, egui::Button::new("＋"));
+                attach.on_hover_text("Attachments: next checkpoint");
                 let mut draft = app.agent.prompt.clone();
                 let response = if app.agent.composer_expanded {
-                    ui.add(egui::TextEdit::multiline(&mut draft).desired_rows(3).desired_width(420.0).char_limit(MAX_PROMPT_BYTES))
+                    ui.add(egui::TextEdit::multiline(&mut draft).desired_rows(3).desired_width(350.0).char_limit(MAX_PROMPT_BYTES))
                 } else {
                     ui.add(
-                        egui::TextEdit::singleline(&mut draft).desired_width(420.0).char_limit(MAX_PROMPT_BYTES).hint_text("Ask about Weekly Sales"),
+                        egui::TextEdit::singleline(&mut draft).desired_width(350.0).char_limit(MAX_PROMPT_BYTES).hint_text("Ask about Weekly Sales"),
                     )
                 };
                 if response.changed() {
@@ -580,16 +522,15 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 if !app.agent.composer_expanded && response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     invoke(app, "ui.agent.submit", json!({}));
                 }
-                if ui.button(if app.agent.composer_expanded { "Collapse" } else { "Expand" }).clicked() {
+                if ui
+                    .button(if app.agent.composer_expanded { "⤡" } else { "⤢" })
+                    .on_hover_text(if app.agent.composer_expanded { "Collapse" } else { "Expand" })
+                    .clicked()
+                {
                     invoke(app, "ui.agent.expand", json!({}));
                 }
-                if ui.button("Remember: exclude test orders").clicked() {
-                    invoke(app, "ui.agent.remember", json!({}));
-                }
-                if ui.button("Compare demo sales").clicked() {
-                    invoke(app, "ui.agent.compare", json!({}));
-                }
-                ui.add_enabled(false, egui::Button::new("Mic"));
+                let mic = ui.add_enabled(false, egui::Button::new("Mic"));
+                mic.on_hover_text("Voice input: next checkpoint");
                 if ui.button("Send").clicked() {
                     invoke(app, "ui.agent.submit", json!({}));
                 }

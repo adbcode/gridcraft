@@ -2,6 +2,27 @@
 
 > Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
 
+## Connected harness (checkpoint 2) — 2026-10-22
+
+- `cargo xtask ci`: all 8 steps passed (fmt, clippy, test, assets, layers, wasm, parity, keytips).
+- Disposable PostgreSQL (`GRIDCRAFT_TEST_DATABASE_URL`): 7 ignored DB tests passed, including
+  `runs_fake_openai` (local fake Chat Completions server: start → `compare_sales` →
+  `write_sales_review` plan → continue → completed with 1 action; request-ID replay and 409 on a
+  different body; exact continue replay without a second receipt; 409 for a different outcome or
+  tool call ID; stale run → interrupted → resume; `remember_rule` then current total €155.00; mock
+  file listing and bounded preview).
+- `gridcraft-ui-egui --test agent_workspace`: 13 passed, 7 of them connected mode against a scripted
+  `AgentApi`: manual edit → Apply → `stale_workbook` with the edit kept; busy editor → `busy` with the
+  draft kept; Discard → `user_declined`; verified write and action count = completed receipts;
+  network failure retries the identical body (3 attempts) then offers Retry; file search, attach and
+  unsupported formats.
+- Live provider smoke (local service, local database, configured OpenAI model): compare €150.00 →
+  €655.00 with a sourced `sales_query`; "Remember to exclude test orders" saved as a rule; compare
+  again €150.00 → €155.00. The model needed `OPENAI_REASONING_EFFORT=none`: without it, Chat
+  Completions returned HTTP 400 (`invalid_request_error`, param `reasoning_effort`) for function tools.
+- Known pre-existing issue: `cargo clippy --target wasm32-unknown-unknown -p gridcraft-web` reports
+  `backstage.rs` dead variants and a `desktop_theme.rs` lint, which are unchanged from the baseline.
+
 ## Service baseline — 2026-10-22
 
 Work started from the clean `feat/agentic-foundation` commit
@@ -166,5 +187,6 @@ The web build still reports the pre-existing unused `Modified::At`/`Unknown` var
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | major | Checkpoint 2 durable runs, fake-provider/DB/UI tests and live OpenAI smoke |
 | 2026-10-22 | major | Rust service/configuration/provider checks, unchanged workbook contracts and explicit database/container/live integration gates |
 | 2026-10-21 | major | Offline engine/UI checks, actual browser bridge evidence and explicit live-service limits |

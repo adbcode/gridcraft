@@ -25,6 +25,13 @@ durable agent loop. An API save does not itself mark the browser document saved.
 | `GET /api/workbooks` | Bounded workbook list with latest database version |
 | `PUT /api/workbooks/{workbook_uuid}` | `{ "title": "Weekly sales" }`; idempotent creation, changed title under the same ID conflicts |
 | `POST /api/workbooks/{workbook_uuid}/snapshots` | Multipart `metadata` JSON and `file` bytes; atomic commit receipt |
+| `GET /api/files?q=` | Searchable library cards: workbook ID, title, `origin` (`mock` for the three seeded mock workbooks), latest version and SHA-256 |
+| `GET /api/files/{workbook_uuid}/versions/{version}/preview` | Bounded first rows of each sheet of that exact version |
+| `GET /api/workbooks/{workbook_uuid}/snapshots/{version}` | Exact stored bytes of that version |
+| `POST /api/runs/start` | `RunStart` (request ID, workbook session, prompt, versioned attachments, bridge context); same request ID and body replays, different body returns 409 |
+| `POST /api/runs/{run_uuid}/continue` | `RunContinue` for the one outstanding tool call; identical retry replays without a second receipt, a different outcome or tool call ID returns 409 |
+| `GET /api/runs/{run_uuid}` | `RunView`; a `running` run idle for more than 90 s is reported `interrupted` |
+| `POST /api/runs/{run_uuid}/resume` | Continues an interrupted run from its persisted conversation |
 | `GET /api/workbooks/{workbook_uuid}/snapshots/latest` | Saved bytes; `x-gridcraft-storage-version` and `x-gridcraft-sha256` headers identify the returned snapshot |
 
 JSON requests are capped at 1 MiB. Snapshot bytes are capped at 16 MiB, metadata at 16 KiB,

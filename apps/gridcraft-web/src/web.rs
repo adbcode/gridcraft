@@ -148,7 +148,9 @@ impl eframe::App for WebShell {
 fn services(inbox: Inbox, ctx: egui::Context) -> Services {
     let open_inbox = inbox.clone();
     let picture_ctx = ctx.clone();
+    let agent_ctx = ctx.clone();
     Services {
+        agent_api: Some(Box::new(crate::agent_http::HttpAgentApi::new(agent_ctx))),
         copy_html: Some(Box::new(copy_html)),
         open_async: Some(Box::new(move || {
             let inbox = open_inbox.clone();

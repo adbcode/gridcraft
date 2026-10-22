@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod agent_api;
+pub mod agent_remote;
 pub mod backstage;
 mod border_preview;
 mod cell_pictures;
@@ -197,6 +199,8 @@ pub struct Services {
     pub open_async: Option<Box<dyn Fn()>>,
     /// Files delivered asynchronously (name, bytes), opened on the next frame.
     pub inbox: Option<Inbox>,
+    /// Connected agent service (web). `None` keeps the deterministic local demo.
+    pub agent_api: Option<Box<dyn agent_api::AgentApi>>,
     /// Web: hand PDF bytes to the browser's print flow directly (no download,
     /// no intermediate file) — opens the system print dialog on that PDF.
     pub print: Option<Box<dyn Fn(&[u8])>>,
@@ -1177,6 +1181,7 @@ impl SheetApp {
         // The language the widgets translate with this frame (see `i18n::current`).
         i18n::set_current(&ctx, self.ui.language);
         let t = theme::Tokens::get(&ctx);
+        agent::poll(self, &ctx);
         agent::observe(self);
         // A host can turn the File tab off while Backstage is already open: close it.
         if !self.chrome.file_tab {

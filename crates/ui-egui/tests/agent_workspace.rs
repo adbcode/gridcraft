@@ -144,3 +144,198 @@ fn rendered_mode_toggle_and_suggestion_chip_drives_the_command_workflow() {
     assert!(!harness.state().agent.enabled);
     assert_eq!(harness.state().session.doc().unwrap().uid, uid);
 }
+
+mod connected {
+    use gridcraft_engine::Session;
+    use gridcraft_engine::core::{CellRef, Value};
+    use gridcraft_ui_egui::agent::poll_at;
+    use gridcraft_ui_egui::agent_api::{ApiRequest, Method, ScriptedApi};
+    use gridcraft_ui_egui::agent_remote::{Connection, MAX_ATTEMPTS};
+    use gridcraft_ui_egui::{Services, SheetApp, editor::EditState};
+    use serde_json::{Value as Json, json};
+
+    const RUN: &str = "0b7c2a3e-0000-4000-8000-000000000001";
+
+    fn app() -> (SheetApp, ScriptedApi) {
+        let api = ScriptedApi::default();
+        api.route(Method::Get, "/api/status", 200, json!({"durable_agent_loop": true, "openai_configured": true, "database_configured": true}));
+        api.route(
+            Method::Get,
+            "/api/files",
+            200,
+            json!([
+                {"workbook_id": "11111111-1111-1111-1111-111111111111", "title": "Weekly Sales.xlsx", "origin": "mock", "latest_version": 1, "sha256": "aa"},
+                {"workbook_id": "22222222-2222-2222-2222-222222222222", "title": "Quarterly Forecast.xlsx", "origin": "mock", "latest_version": 1, "sha256": "bb"},
+                {"workbook_id": "44444444-4444-4444-4444-444444444444", "title": "Notes.pdf", "origin": "mock", "latest_version": 1, "sha256": "cc"}
+            ]),
+        );
+        api.route(Method::Get, "/api/rules", 200, json!([]));
+        let mut session = Session::new();
+        session.new_workbook();
+        let mut app = SheetApp::new(session, Services { agent_api: Some(Box::new(api.clone())), ..Services::default() });
+        poll_at(&mut app, 0.0);
+        poll_at(&mut app, 0.0);
+        assert_eq!(app.agent.remote.connection, Connection::Connected);
+        (app, api)
+    }
+
+    fn sheet(app: &SheetApp) -> String {
+        app.session.doc().unwrap().wb.active().unwrap().name.clone()
+    }
+
+    fn value(app: &SheetApp, cell: &str) -> Value {
+        app.session.doc().unwrap().wb.active().unwrap().value(CellRef::parse(cell).unwrap())
+    }
+
+    fn view(status: &str, pending: Json, actions: i32) -> Json {
+        json!({"run_id": RUN, "status": status, "pending_tool": pending, "final_text": if status == "completed" { json!("Done.") } else { Json::Null },
+               "action_count": actions, "sources": [{"kind": "sales_query", "label": "Synthetic demo sales", "id": "q-1", "version": 1}]})
+    }
+
+    fn write(sheet: &str) -> Json {
+        json!({"tool_call_id": "call_1", "name": "write_range", "arguments": {}, "write": {"sheet": sheet, "range": "A1", "values": [["Total", 5]]}})
+    }
+
+    /// Submit, then answer the start request with a pending write proposal.
+    fn propose(app: &mut SheetApp, api: &ScriptedApi) {
+        app.run("ui.agent.submit", json!({"text": "Write the total"})).unwrap();
+        let start = api.last().unwrap();
+        assert_eq!(start.path, "/api/runs/start");
+        let name = sheet(app);
+        api.reply(start.ticket, 200, &view("awaiting_tool", write(&name), 0));
+        poll_at(app, 0.0);
+        assert!(app.agent.remote.approval.is_some());
+        assert!(value(app, "A1").is_empty());
+    }
+
+    fn last_continue(api: &ScriptedApi) -> ApiRequest {
+        let request = api.last().unwrap();
+        assert_eq!(request.path, format!("/api/runs/{RUN}/continue"));
+        request
+    }
+
+    fn outcome(request: &ApiRequest) -> Json {
+        let body = request.body.clone().unwrap();
+        assert_eq!(body["tool_call_id"], "call_1");
+        body["outcome"].clone()
+    }
+
+    #[test]
+    fn status_without_agent_loop_keeps_the_local_demo() {
+        let api = ScriptedApi::default();
+        api.route(Method::Get, "/api/status", 200, json!({"durable_agent_loop": false, "openai_configured": false, "database_configured": true}));
+        let mut session = Session::new();
+        session.new_workbook();
+        let mut app = SheetApp::new(session, Services { agent_api: Some(Box::new(api.clone())), ..Services::default() });
+        poll_at(&mut app, 0.0);
+        poll_at(&mut app, 0.0);
+        assert_eq!(app.agent.remote.connection, Connection::LocalDemo);
+        app.run("ui.agent.submit", json!({"text": "Compare sales"})).unwrap();
+        assert!(app.agent.preview.is_some(), "local demo still answers deterministically");
+        assert_eq!(api.sent().len(), 1, "no run was started on the service");
+    }
+
+    #[test]
+    fn manual_edit_after_a_proposal_makes_apply_report_stale_and_keeps_the_edit() {
+        let (mut app, api) = app();
+        propose(&mut app, &api);
+        app.run("cell.set", json!({"cell": "A1", "input": "manual"})).unwrap();
+        assert_eq!(app.run("ui.agent.apply", json!({})).unwrap()["outcome"], "stale_workbook");
+        assert_eq!(outcome(&last_continue(&api)), json!({"ok": false, "result": null, "error": "stale_workbook"}));
+        assert_eq!(value(&app, "A1"), Value::text("manual"));
+        assert!(value(&app, "B1").is_empty());
+    }
+
+    #[test]
+    fn busy_editor_reports_busy_and_keeps_the_draft() {
+        let (mut app, api) = app();
+        propose(&mut app, &api);
+        app.editor = Some(EditState::new(0, CellRef::default(), "unfinished draft".into(), true, false));
+        assert_eq!(app.run("ui.agent.apply", json!({})).unwrap()["outcome"], "busy");
+        assert_eq!(outcome(&last_continue(&api))["error"], "busy");
+        assert_eq!(app.editor.as_ref().unwrap().text, "unfinished draft");
+        assert!(value(&app, "A1").is_empty());
+    }
+
+    #[test]
+    fn discard_reports_user_declined_without_writing() {
+        let (mut app, api) = app();
+        propose(&mut app, &api);
+        assert_eq!(app.run("ui.agent.discard", json!({})).unwrap()["outcome"], "user_declined");
+        assert_eq!(outcome(&last_continue(&api))["error"], "user_declined");
+        assert!(value(&app, "A1").is_empty());
+        assert!(app.agent.remote.approval.is_none());
+    }
+
+    #[test]
+    fn apply_writes_verifies_and_counts_completed_receipts() {
+        let (mut app, api) = app();
+        propose(&mut app, &api);
+        assert_eq!(app.run("ui.agent.apply", json!({})).unwrap()["outcome"], "applied");
+        assert_eq!(value(&app, "A1"), Value::text("Total"));
+        assert_eq!(value(&app, "B1"), Value::Number(5.0));
+        let request = last_continue(&api);
+        let result = outcome(&request);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["result"]["verified"], true);
+        assert_eq!(result["result"]["range"], "A1:B1");
+        api.reply(request.ticket, 200, &view("completed", Json::Null, 1));
+        poll_at(&mut app, 0.0);
+        let run = app.agent.remote.run.clone().unwrap();
+        assert_eq!(run.action_count, 1);
+        assert_eq!(app.agent.remote.actions.len(), 1);
+        assert_eq!(app.agent.messages.last().unwrap().text, "Done.");
+    }
+
+    #[test]
+    fn network_failures_retry_the_identical_body_then_offer_retry() {
+        let (mut app, api) = app();
+        propose(&mut app, &api);
+        app.run("ui.agent.apply", json!({})).unwrap();
+        let first = last_continue(&api);
+        let mut now = 0.0;
+        let mut previous = first.clone();
+        for attempt in 1..=MAX_ATTEMPTS {
+            api.reply(previous.ticket, 0, &Json::Null);
+            poll_at(&mut app, now);
+            now += 10.0;
+            poll_at(&mut app, now);
+            if attempt < MAX_ATTEMPTS {
+                let resent = last_continue(&api);
+                assert_ne!(resent.ticket, previous.ticket);
+                assert_eq!(resent.body, first.body, "same body and tool_call_id on retry {attempt}");
+                previous = resent;
+            }
+        }
+        assert!(app.agent.error.is_some());
+        assert!(app.agent.remote.retry.is_some());
+        let sent = api.sent().len();
+        app.run("ui.agent.retry", json!({})).unwrap();
+        assert_eq!(api.sent().len(), sent + 1);
+        assert_eq!(last_continue(&api).body, first.body);
+        assert_eq!(value(&app, "A1"), Value::text("Total"), "the write happened once");
+    }
+
+    #[test]
+    fn files_search_attach_and_unsupported_formats() {
+        let (mut app, api) = app();
+        app.run("ui.agent.files", json!({"open": true})).unwrap();
+        assert!(api.last().unwrap().path.starts_with("/api/files?q="));
+        poll_at(&mut app, 0.0);
+        assert_eq!(app.agent.remote.files.len(), 3);
+        app.run("ui.agent.fileSearch", json!({"q": "weekly sales"})).unwrap();
+        assert_eq!(api.last().unwrap().path, "/api/files?q=weekly%20sales");
+        poll_at(&mut app, 0.0);
+        assert_eq!(app.run("ui.agent.attach", json!({"workbook_id": "44444444-4444-4444-4444-444444444444"})).unwrap_err(), "Unsupported format");
+        app.run("ui.agent.attach", json!({"workbook_id": "22222222-2222-2222-2222-222222222222"})).unwrap();
+        app.run("ui.agent.fileOpen", json!({"workbook_id": "11111111-1111-1111-1111-111111111111"})).unwrap();
+        assert_eq!(api.last().unwrap().path, "/api/workbooks/11111111-1111-1111-1111-111111111111/snapshots/1");
+        app.run("ui.agent.submit", json!({"text": "Compare with the forecast"})).unwrap();
+        let start = api.last().unwrap();
+        assert_eq!(
+            start.body.unwrap()["attachments"],
+            json!([{"workbook_id": "22222222-2222-2222-2222-222222222222", "version": 1, "sha256": "bb"}])
+        );
+        assert!(app.agent.remote.attachments.is_empty());
+    }
+}

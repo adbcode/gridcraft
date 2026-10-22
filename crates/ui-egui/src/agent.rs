@@ -6,6 +6,8 @@ use gridcraft_engine::core::{CellRef, Value};
 use gridcraft_engine::review_workflow::{ComparisonPeriods, ReviewRule, SalesReview, compare_sales, demo_sales};
 use serde_json::{Value as Json, json};
 
+use crate::agent_remote::{self, Connection};
+use crate::icons::{self, Icon};
 use crate::{SheetApp, theme::Tokens};
 
 const MAX_MESSAGES: usize = 40;
@@ -23,7 +25,13 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.agent.dismiss", "Dismiss Agent Response", "{}; refuses while a preview or error is unresolved"),
     ("ui.agent.expand", "Expand Agent Composer", "{on?: bool}; expand or collapse the composer"),
     ("ui.agent.rules", "Show Agent Rules", "{open?: bool}; open or close remembered rules"),
-    ("ui.agent.files", "Show Agent Files", "{open?: bool}; open or close the cloud files placeholder"),
+    ("ui.agent.files", "Show Agent Files", "{open?: bool}; open or close the cloud file library"),
+    ("ui.agent.retry", "Retry Agent Request", "{}; re-sends the identical failed request"),
+    ("ui.agent.fileSearch", "Search Cloud Files", "{q: string}; connected mode only"),
+    ("ui.agent.filePreview", "Preview Cloud File", "{workbook_id: string}; first rows of the latest version"),
+    ("ui.agent.fileOpen", "Open Cloud File", "{workbook_id: string}; opens that exact version"),
+    ("ui.agent.attach", "Attach Cloud File", "{workbook_id: string}; adds a versioned chip to the composer"),
+    ("ui.agent.detach", "Remove Attachment", "{workbook_id: string}"),
 ];
 
 #[derive(Clone, Debug)]
@@ -54,13 +62,14 @@ pub struct State {
     pub composer_expanded: bool,
     pub rules_open: bool,
     pub files_open: bool,
-    bridge: BridgeState,
+    pub remote: agent_remote::Remote,
+    pub(crate) bridge: BridgeState,
     next_id: u64,
     last_range: Option<String>,
 }
 
 impl State {
-    fn message(&mut self, from_user: bool, text: impl Into<String>) {
+    pub(crate) fn message(&mut self, from_user: bool, text: impl Into<String>) {
         self.messages.push(Message { from_user, text: text.into() });
         if self.messages.len() > MAX_MESSAGES {
             self.messages.remove(0);
@@ -82,9 +91,23 @@ impl State {
 
 /// Observe every frame, including Classic mode, so hiding the panel never weakens conflicts.
 pub fn observe(app: &mut SheetApp) {
-    let current = app.agent.bridge.observe(&app.session);
-    app.agent.preview_stale =
-        app.agent.preview.as_ref().is_some_and(|preview| current.as_ref().map_or(true, |context| context.identity != preview.expected));
+    let current = app.agent.bridge.observe(&app.session).ok().map(|context| context.identity);
+    app.agent.preview_stale = app.agent.preview.as_ref().is_some_and(|preview| current.as_ref() != Some(&preview.expected));
+    agent_remote::observe(&mut app.agent, current.as_ref());
+}
+
+/// Drain connected-service responses and fire due retries.
+pub fn poll(app: &mut SheetApp, ctx: &egui::Context) {
+    poll_at(app, ctx.input(|i| i.time));
+    if agent_remote::retry_pending(&app.agent) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
+}
+
+pub fn poll_at(app: &mut SheetApp, now: f64) {
+    let mut state = std::mem::take(&mut app.agent);
+    agent_remote::poll(&mut state, app, now);
+    app.agent = state;
 }
 
 pub fn command(app: &mut SheetApp, id: &str, params: &Json) -> Result<Json, String> {
@@ -122,6 +145,9 @@ fn execute(state: &mut State, app: &mut SheetApp, id: &str, params: &Json) -> Re
                 return Err("enter a request of 1 to 2,000 bytes".into());
             }
             state.message(true, text.clone());
+            if agent_remote::connected(state) {
+                return agent_remote::submit(state, app, text);
+            }
             let normalized = text.trim_end_matches(['.', '?', '!']).to_ascii_lowercase();
             match normalized.as_str() {
                 "remember to exclude test orders" | "exclude test orders" => remember(state),
@@ -133,8 +159,10 @@ fn execute(state: &mut State, app: &mut SheetApp, id: &str, params: &Json) -> Re
         }
         "ui.agent.remember" => remember(state),
         "ui.agent.compare" => compare(state, app),
+        "ui.agent.apply" if state.remote.approval.is_some() => agent_remote::apply(state, app),
         "ui.agent.apply" => apply(state, app),
         "ui.agent.undo" => undo(state, app),
+        "ui.agent.discard" if state.remote.approval.is_some() => agent_remote::discard(state, app),
         "ui.agent.discard" => {
             state.preview = None;
             state.preview_stale = false;
@@ -142,7 +170,7 @@ fn execute(state: &mut State, app: &mut SheetApp, id: &str, params: &Json) -> Re
             Ok(json!({"discarded": true}))
         }
         "ui.agent.dismiss" => {
-            if state.preview.is_some() {
+            if state.preview.is_some() || state.remote.approval.is_some() {
                 return Err("dismiss the pending preview before closing this response".into());
             }
             if state.error.is_some() {
@@ -157,12 +185,28 @@ fn execute(state: &mut State, app: &mut SheetApp, id: &str, params: &Json) -> Re
         }
         "ui.agent.rules" => {
             state.rules_open = params.get("open").and_then(Json::as_bool).unwrap_or(!state.rules_open);
+            if state.rules_open {
+                agent_remote::load_rules(state, app);
+            }
             Ok(json!({"open": state.rules_open}))
         }
         "ui.agent.files" => {
             state.files_open = params.get("open").and_then(Json::as_bool).unwrap_or(!state.files_open);
+            if state.files_open && agent_remote::connected(state) && state.remote.files.is_empty() {
+                let query = state.remote.files_query.clone();
+                agent_remote::search_files(state, app, &query)?;
+            }
             Ok(json!({"open": state.files_open}))
         }
+        "ui.agent.retry" => agent_remote::retry(state, app),
+        "ui.agent.fileSearch" => {
+            let query = params.get("q").and_then(Json::as_str).ok_or("q is required")?;
+            agent_remote::search_files(state, app, query)
+        }
+        "ui.agent.filePreview" => agent_remote::preview_file(state, app, params),
+        "ui.agent.fileOpen" => agent_remote::open_file(state, app, params),
+        "ui.agent.attach" => agent_remote::attach(state, params),
+        "ui.agent.detach" => agent_remote::detach(state, params),
         _ => Err(format!("unknown agent command {id}")),
     }
 }
@@ -329,7 +373,7 @@ pub fn mode_bar(app: &mut SheetApp, ui: &mut egui::Ui) {
                     invoke(app, "ui.agent.toggle", json!({"on":true}));
                 }
                 if app.agent.enabled {
-                    ui.label(egui::RichText::new("Local demo | same live workbook").small().color(t.text_dim));
+                    ui.label(egui::RichText::new(format!("{} | same live workbook", connection_label(&app.agent))).small().color(t.text_dim));
                 }
             });
         },
@@ -350,6 +394,7 @@ pub fn header(app: &mut SheetApp, ui: &mut egui::Ui) {
                         .small()
                         .color(t.text_dim),
                 );
+                ui.label(egui::RichText::new(connection_label(&app.agent)).small().color(t.accent));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Classic").clicked() {
                         invoke(app, "ui.agent.toggle", json!({"on": false}));
@@ -386,7 +431,15 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 }
             });
             ui.separator();
-            if app.agent.rules.is_empty() {
+            if agent_remote::connected(&app.agent) {
+                if app.agent.remote.rules.is_empty() {
+                    ui.label("No rule remembered yet. Ask: Remember to exclude test orders.");
+                }
+                for rule in app.agent.remote.rules.clone() {
+                    ui.add(egui::Label::new(egui::RichText::new(format!("Enabled: {rule}")).color(t.accent)).wrap());
+                }
+                ui.label(egui::RichText::new("Saved in the workspace database").small().color(t.text_dim));
+            } else if app.agent.rules.is_empty() {
                 ui.label("No rule remembered.");
                 if ui.button("Remember: exclude test orders").clicked() {
                     invoke(app, "ui.agent.remember", json!({}));
@@ -398,7 +451,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
         });
     }
     if app.agent.files_open {
-        egui::Window::new("Files").show(&ctx, |ui| {
+        egui::Window::new("Files").default_width(440.0).show(&ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Files").strong());
                 if ui.button("Close").clicked() {
@@ -406,7 +459,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 }
             });
             ui.separator();
-            ui.label("Cloud library arrives in the next checkpoint");
+            files_body(app, ui);
         });
     }
     if app.agent.card_visible && (!app.agent.messages.is_empty() || app.agent.preview.is_some() || app.agent.error.is_some()) {
@@ -423,34 +476,38 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 ui.set_width(596.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Agent response").strong());
-                    if ui.button("×").clicked() {
+                    if icon_button(ui, true, "Dismiss", |p, r, c| icons::paint(p, r, Icon::Close, c)).clicked() {
                         invoke(app, "ui.agent.dismiss", json!({}));
                     }
                 });
                 if let Some(message) = app.agent.messages.last() {
                     ui.add(egui::Label::new(&message.text).wrap());
                 }
-                ui.collapsing("Sources", |ui| {
-                    ui.add(egui::Label::new("Synthetic demo sales").wrap());
-                    if let Some(preview) = &app.agent.preview {
-                        let p = preview.review.provenance();
-                        ui.add(
-                            egui::Label::new(format!("Query: {} | {} / {} records", p.query_id, p.previous_record_count, p.current_record_count))
+                if agent_remote::connected(&app.agent) {
+                    connected_details(app, ui);
+                } else {
+                    ui.collapsing("Sources", |ui| {
+                        ui.add(egui::Label::new("Synthetic demo sales").wrap());
+                        if let Some(preview) = &app.agent.preview {
+                            let p = preview.review.provenance();
+                            ui.add(
+                                egui::Label::new(format!("Query: {} | {} / {} records", p.query_id, p.previous_record_count, p.current_record_count))
+                                    .wrap(),
+                            );
+                            ui.add(
+                                egui::Label::new(format!(
+                                    "Rules applied: {}",
+                                    if p.applied_rule_ids.is_empty() { "none".into() } else { p.applied_rule_ids.join(", ") }
+                                ))
                                 .wrap(),
-                        );
-                        ui.add(
-                            egui::Label::new(format!(
-                                "Rules applied: {}",
-                                if p.applied_rule_ids.is_empty() { "none".into() } else { p.applied_rule_ids.join(", ") }
-                            ))
-                            .wrap(),
-                        );
-                    }
-                });
-                if !app.agent.receipts.is_empty() {
-                    ui.collapsing("Actions", |ui| {
-                        ui.label(format!("{} completed operation(s)", app.agent.receipts.len()));
+                            );
+                        }
                     });
+                    if !app.agent.receipts.is_empty() {
+                        ui.collapsing("Actions", |ui| {
+                            ui.label(format!("{} completed operation(s)", app.agent.receipts.len()));
+                        });
+                    }
                 }
                 if let Some(preview) = app.agent.preview.clone() {
                     egui::Frame::NONE.fill(t.accent_soft).inner_margin(10).corner_radius(6).show(ui, |ui| {
@@ -505,9 +562,27 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 });
                 ui.add_space(4.0);
             }
+            if !app.agent.remote.attachments.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for file in app.agent.remote.attachments.clone() {
+                        egui::Frame::NONE.fill(t.accent_soft).corner_radius(6).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("{} | v{}", file.title, file.latest_version)).small());
+                                if icon_button(ui, true, "Remove attachment", |p, r, c| icons::paint(p, r, Icon::Close, c)).clicked() {
+                                    invoke(app, "ui.agent.detach", json!({"workbook_id": file.workbook_id}));
+                                }
+                            });
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+            }
             ui.horizontal(|ui| {
-                let attach = ui.add_enabled(false, egui::Button::new("＋"));
-                attach.on_hover_text("Attachments: next checkpoint");
+                let online = agent_remote::connected(&app.agent);
+                let hover = if online { "Attach a cloud file" } else { "Attachments need the GridCraft service" };
+                if icon_button(ui, online, hover, |p, r, c| icons::paint(p, r, Icon::Plus, c)).clicked() && online {
+                    invoke(app, "ui.agent.files", json!({"open": true}));
+                }
                 let mut draft = app.agent.prompt.clone();
                 let response = if app.agent.composer_expanded {
                     ui.add(egui::TextEdit::multiline(&mut draft).desired_rows(3).desired_width(350.0).char_limit(MAX_PROMPT_BYTES))
@@ -522,19 +597,195 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 if !app.agent.composer_expanded && response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     invoke(app, "ui.agent.submit", json!({}));
                 }
-                if ui
-                    .button(if app.agent.composer_expanded { "⤡" } else { "⤢" })
-                    .on_hover_text(if app.agent.composer_expanded { "Collapse" } else { "Expand" })
-                    .clicked()
-                {
+                let expanded = app.agent.composer_expanded;
+                let icon = if expanded { Icon::Chevron } else { Icon::ChevronUp };
+                if icon_button(ui, true, if expanded { "Collapse" } else { "Expand" }, |p, r, c| icons::paint(p, r, icon, c)).clicked() {
                     invoke(app, "ui.agent.expand", json!({}));
                 }
-                let mic = ui.add_enabled(false, egui::Button::new("Mic"));
-                mic.on_hover_text("Voice input: next checkpoint");
-                if ui.button("Send").clicked() {
+                let _ = icon_button(ui, false, "Voice input: next checkpoint", paint_mic);
+                if ui.add_enabled(!agent_remote::busy(&app.agent), egui::Button::new("Send")).clicked() {
                     invoke(app, "ui.agent.submit", json!({}));
                 }
             });
         });
     });
+}
+
+fn connection_label(state: &State) -> &'static str {
+    match state.remote.connection {
+        Connection::Connected => "Connected",
+        Connection::LocalDemo => "Local demo",
+        Connection::Checking => "Checking service",
+    }
+}
+
+/// Square, painter-drawn icon button (no font glyphs, so no tofu).
+fn icon_button(ui: &mut egui::Ui, enabled: bool, hover: &str, paint: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32)) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), sense);
+    if enabled && response.hovered() {
+        ui.painter().rect_filled(rect, 5.0, t.accent_soft);
+    }
+    paint(ui.painter(), rect.shrink(5.0), if enabled { t.text } else { t.text_dim });
+    response.on_hover_text(hover)
+}
+
+fn paint_mic(p: &egui::Painter, rect: egui::Rect, c: egui::Color32) {
+    let s = rect.width() / 16.0;
+    let cx = rect.center().x;
+    let top = rect.top();
+    let stroke = egui::Stroke::new(1.3, c);
+    let body = egui::Rect::from_min_max(egui::pos2(cx - 2.5 * s, top + 1.0 * s), egui::pos2(cx + 2.5 * s, top + 9.5 * s));
+    p.rect_stroke(body, 2.5 * s, stroke, egui::StrokeKind::Inside);
+    let arc: Vec<egui::Pos2> = (0..=10)
+        .map(|i| {
+            let a = std::f32::consts::PI * (i as f32 / 10.0);
+            egui::pos2(cx - 4.5 * s * a.cos(), top + 7.5 * s + 4.5 * s * a.sin())
+        })
+        .collect();
+    p.add(egui::Shape::line(arc, stroke));
+    p.line_segment([egui::pos2(cx, top + 12.0 * s), egui::pos2(cx, top + 15.0 * s)], stroke);
+    p.line_segment([egui::pos2(cx - 3.0 * s, top + 15.0 * s), egui::pos2(cx + 3.0 * s, top + 15.0 * s)], stroke);
+}
+
+fn cell_text(value: &Json) -> String {
+    let text = match value {
+        Json::Null => String::new(),
+        Json::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    text.chars().take(24).collect()
+}
+
+fn files_body(app: &mut SheetApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    if !agent_remote::connected(&app.agent) {
+        ui.label("The cloud library needs the GridCraft service. This build is running the local demo.");
+        return;
+    }
+    let mut query = app.agent.remote.files_query.clone();
+    if ui.add(egui::TextEdit::singleline(&mut query).hint_text("Search files").desired_width(f32::INFINITY)).changed() {
+        invoke(app, "ui.agent.fileSearch", json!({"q": query}));
+    }
+    if let Some(error) = &app.agent.remote.files_error {
+        ui.add(egui::Label::new(egui::RichText::new(error).color(t.danger)).wrap());
+    }
+    if app.agent.remote.files.is_empty() {
+        ui.label(egui::RichText::new("No files match.").color(t.text_dim));
+    }
+    for file in app.agent.remote.files.clone() {
+        egui::Frame::NONE.stroke(egui::Stroke::new(1.0, t.ribbon_border)).corner_radius(6).inner_margin(8).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&file.title).strong());
+                if file.is_mock() {
+                    ui.label(egui::RichText::new(" MOCK ").small().strong().color(t.accent).background_color(t.accent_soft));
+                }
+                ui.label(egui::RichText::new(format!("v{}", file.latest_version)).small().color(t.text_dim));
+            });
+            ui.horizontal(|ui| {
+                let id = json!({"workbook_id": file.workbook_id});
+                if !file.supported() {
+                    ui.add_enabled(false, egui::Button::new("Unsupported format"));
+                    return;
+                }
+                if ui.button("Preview").clicked() {
+                    invoke(app, "ui.agent.filePreview", id.clone());
+                }
+                if ui.button("Open").clicked() {
+                    invoke(app, "ui.agent.fileOpen", id.clone());
+                }
+                let attached = app.agent.remote.attachments.iter().any(|a| a.workbook_id == file.workbook_id);
+                if ui.add_enabled(!attached, egui::Button::new(if attached { "Attached" } else { "Attach" })).clicked() {
+                    invoke(app, "ui.agent.attach", id);
+                }
+            });
+        });
+    }
+    if let Some(preview) = app.agent.remote.file_preview.clone() {
+        ui.separator();
+        let title = app.agent.remote.files.iter().find(|f| f.workbook_id == preview.workbook_id).map_or("File", |f| f.title.as_str()).to_string();
+        for sheet in preview.sheets.iter().take(1) {
+            ui.label(egui::RichText::new(format!("Preview: {title} | {} | v{}", sheet.name, preview.version)).strong());
+            egui::Grid::new("agent_file_preview").striped(true).show(ui, |ui| {
+                for row in sheet.cells.iter().take(8) {
+                    for cell in row.iter().take(6) {
+                        ui.label(cell_text(cell));
+                    }
+                    ui.end_row();
+                }
+            });
+        }
+    }
+}
+
+fn source_kind(kind: &str) -> &str {
+    match kind {
+        "sales_query" => "Sales query",
+        "workbook" => "Workbook",
+        "rule" => "Rule",
+        other => other,
+    }
+}
+
+fn connected_details(app: &mut SheetApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    if let Some(run) = app.agent.remote.run.clone() {
+        egui::CollapsingHeader::new("Sources").default_open(!run.sources.is_empty()).show(ui, |ui| {
+            if run.sources.is_empty() {
+                ui.label(egui::RichText::new("No sources reported.").color(t.text_dim));
+            }
+            for source in &run.sources {
+                let version = source.version.map(|v| format!(" | v{v}")).unwrap_or_default();
+                ui.add(egui::Label::new(format!("{}: {}{version}", source_kind(&source.kind), source.label)).wrap());
+                ui.label(egui::RichText::new(&source.id).small().color(t.text_dim));
+            }
+        });
+        if run.action_count > 0 || !app.agent.remote.actions.is_empty() {
+            ui.collapsing("Actions", |ui| {
+                ui.label(format!("{} completed operation(s)", run.action_count));
+                for action in &app.agent.remote.actions {
+                    ui.label(egui::RichText::new(action).small());
+                }
+            });
+        }
+    }
+    if let Some(approval) = app.agent.remote.approval.clone() {
+        egui::Frame::NONE.fill(t.accent_soft).inner_margin(10).corner_radius(6).show(ui, |ui| {
+            ui.label(egui::RichText::new("Proposed change").strong());
+            match &approval.tool.write {
+                Some(plan) => {
+                    let range = agent_remote::target_range(plan).unwrap_or_else(|| plan.range.clone());
+                    ui.label(format!("{range} on {} | {} row(s)", plan.sheet, plan.values.len()));
+                    egui::Grid::new("agent_write_plan").striped(true).show(ui, |ui| {
+                        for row in plan.values.iter().take(6) {
+                            for cell in row.iter().take(5) {
+                                ui.label(egui::RichText::new(cell_text(cell)).small());
+                            }
+                            ui.end_row();
+                        }
+                    });
+                }
+                None => {
+                    ui.label("Undo the last workbook operation. This may undo a manual edit.");
+                }
+            }
+            if app.agent.remote.approval_stale {
+                ui.colored_label(t.danger, "Workbook changed since this proposal. Apply will refuse and tell the agent.");
+            }
+            ui.horizontal(|ui| {
+                let ready = !agent_remote::busy(&app.agent);
+                if ui.add_enabled(ready, egui::Button::new("Apply to workbook")).clicked() {
+                    invoke(app, "ui.agent.apply", json!({}));
+                }
+                if ui.add_enabled(ready, egui::Button::new("Discard")).clicked() {
+                    invoke(app, "ui.agent.discard", json!({}));
+                }
+            });
+        });
+    }
+    if app.agent.remote.retry.is_some() && ui.button("Retry").clicked() {
+        invoke(app, "ui.agent.retry", json!({}));
+    }
 }

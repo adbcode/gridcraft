@@ -1192,11 +1192,15 @@ impl SheetApp {
             // File tab: the Backstage view replaces everything below the title bar.
             backstage::show(self, ui);
         } else {
-            agent::mode_bar(self, ui);
-            ribbon::show(self, ui);
-            widgets::notice_bar(self, ui);
-            if self.session.prefs.formula_bar {
-                formula_bar::show(self, ui);
+            if self.agent.enabled {
+                agent::header(self, ui);
+            } else {
+                agent::mode_bar(self, ui);
+                ribbon::show(self, ui);
+                widgets::notice_bar(self, ui);
+                if self.session.prefs.formula_bar {
+                    formula_bar::show(self, ui);
+                }
             }
             if self.ui.status_bar {
                 tabs::status_bar(self, ui);

@@ -43,11 +43,29 @@ pub fn start() {
                     } else if q.contains("sample") {
                         let _ = session.execute("file.new", serde_json::json!({"sample": "sales"}));
                     }
+                    let default_open = app_bridge.is_none() && !q.contains("sample");
+                    let default_result = if default_open {
+                        match gridcraft_engine::demo_files::weekly_sales_xlsx() {
+                            Ok(bytes) => {
+                                let encoded = gridcraft_engine::io::base64_encode(&bytes);
+                                session.execute("file.open", serde_json::json!({"name": "Weekly Sales.xlsx", "base64": encoded})).ok()
+                            }
+                            Err(error) => {
+                                log::error!("couldn't build the default workbook: {error}");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone());
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, cc.egui_ctx.clone());
                     }
                     let mut app = SheetApp::new(session, services);
+                    if let Some(result) = default_result {
+                        app.after_open(None, &result);
+                    }
                     app.ui.system_theme = true;
                     // Follow the browser's language, except a CJK one: the web build has no system
                     // CJK fonts (none are bundled), so that interface would render as tofu.

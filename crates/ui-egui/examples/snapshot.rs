@@ -84,6 +84,9 @@ fn main() {
         session.execute("file.open", json!({"path": p})).expect("open");
     } else if let Some(s) = &sample {
         session.execute("file.new", json!({"sample": s})).expect("sample");
+    } else if let Ok(bytes) = gridcraft_engine::demo_files::weekly_sales_xlsx() {
+        let encoded = gridcraft_engine::io::base64_encode(&bytes);
+        let _ = session.execute("file.open", json!({"name": "Weekly Sales.xlsx", "base64": encoded}));
     } else {
         session.new_workbook();
     }

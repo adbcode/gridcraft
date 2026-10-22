@@ -20,7 +20,7 @@ deployment, provider calls, publication or changes to unrelated services.
 - New persistence/provider work: read [delivery.md](../../../docs/agentic/delivery.md) and
   [service-api.md](../../../docs/agentic/service-api.md) and
   [the migrations](../../../apps/gridcraft-server/migrations). The Rust server now supplies
-  storage APIs and provider adapters; the durable agent loop and connected UI remain unfinished.
+  storage APIs, durable run checkpoints and provider adapters; the browser client connects bounded live tools, saving, recovery and voice. Native mode remains a labelled local demo.
 
 Keep one mounted `SheetApp`/`Session` across modes. Keep one `BridgeState` per caller's
 editor lifetime so tokens and retry receipts survive requests. If an embedding host is

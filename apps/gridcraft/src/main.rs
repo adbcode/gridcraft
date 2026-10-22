@@ -295,7 +295,21 @@ fn main() -> eframe::Result<()> {
         log::warn!("sample {s}: {e}");
     }
     if session.documents().is_empty() {
-        session.new_workbook();
+        if files.is_empty() && sample.is_none() {
+            match gridcraft_engine::workspace::demo_xlsx(gridcraft_engine::workspace::WEEKLY_ID) {
+                Ok(bytes) => {
+                    if let Err(error) =
+                        session.execute("file.open", json!({"name":"Weekly Sales.xlsx","base64":gridcraft_engine::io::base64_encode(&bytes)}))
+                    {
+                        log::warn!("default workbook: {error}");
+                    }
+                }
+                Err(error) => log::warn!("default workbook: {error}"),
+            }
+        }
+        if session.documents().is_empty() {
+            session.new_workbook();
+        }
     }
     let mut app = SheetApp::new(session, services());
     app.watch_desktop_theme();

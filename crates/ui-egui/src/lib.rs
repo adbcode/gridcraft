@@ -1182,10 +1182,10 @@ impl SheetApp {
         if !self.chrome.file_tab {
             self.backstage = None;
         }
-        if self.backstage.is_none() {
+        if self.backstage.is_none() && !self.agent.enabled {
             self.ribbon_keys(&ctx);
         }
-        if self.chrome.title_bar {
+        if self.chrome.title_bar && !self.agent.enabled {
             ribbon::title_bar(self, ui);
         }
         if self.backstage.is_some() {
@@ -1193,17 +1193,21 @@ impl SheetApp {
             backstage::show(self, ui);
         } else {
             agent::mode_bar(self, ui);
-            ribbon::show(self, ui);
+            if !self.agent.enabled {
+                ribbon::show(self, ui);
+            }
             widgets::notice_bar(self, ui);
-            if self.session.prefs.formula_bar {
+            if self.session.prefs.formula_bar && !self.agent.enabled {
                 formula_bar::show(self, ui);
             }
             if self.ui.status_bar {
                 tabs::status_bar(self, ui);
             }
             tabs::sheet_tabs(self, ui);
-            pivot_pane::show(self, ui);
-            panes::show(self, ui);
+            if !self.agent.enabled {
+                pivot_pane::show(self, ui);
+                panes::show(self, ui);
+            }
             agent::show(self, ui);
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.grid_bg)).show(ui, |ui| {
                 let g0 = now_ms();

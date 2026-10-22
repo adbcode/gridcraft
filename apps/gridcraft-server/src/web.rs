@@ -28,12 +28,22 @@ pub struct AppState {
     pub openai_configured: bool,
     pub speech_configured: bool,
     pub tts_configured: bool,
+    pub openai: Option<crate::providers::OpenAiClient>,
+    pub elevenlabs: Option<crate::providers::ElevenLabsClient>,
 }
 
 pub fn router(state: AppState) -> Router {
     let assets = ServeDir::new(&state.static_dir).append_index_html_on_directories(true);
     let snapshots = Router::new().route("/api/workbooks/{id}/snapshots", post(upload_snapshot)).layer(DefaultBodyLimit::max(MAX_FILE_BYTES + 65_536));
+    let speech = Router::new().route("/api/speech/transcribe", post(transcribe)).layer(DefaultBodyLimit::max(crate::providers::MAX_AUDIO_BYTES));
     Router::new()
+        .route("/api/runs", post(start_run))
+        .route("/api/runs/{id}", get(run_status))
+        .route("/api/runs/{id}/continue", post(continue_run))
+        .route("/api/runs/{id}/resume", post(resume_run))
+        .route("/api/runs/{id}/speech", post(speak_run))
+        .route("/api/library", get(library))
+        .route("/api/workbooks/{id}/snapshots/{version}", get(download_version))
         .route("/api/health/live", get(|| async { Json(json!({"status":"alive"})) }))
         .route("/api/health/ready", get(ready))
         .route("/api/status", get(status))
@@ -46,9 +56,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/workbooks/{id}/snapshots/latest", get(download_snapshot))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .merge(snapshots)
+        .merge(speech)
         .fallback_service(assets)
         .layer(middleware::from_fn(same_origin))
-        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(30)))
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(120)))
         .with_state(state)
 }
 
@@ -86,7 +97,7 @@ async fn same_origin(request: Request, next: Next) -> Response {
 async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "workspace_mode": "single_mock_user", "authentication": false,
-        "ui_workflow": "offline_demo", "durable_agent_loop": false,
+        "ui_workflow": "connected_when_configured", "durable_agent_loop": state.store.is_some() && state.openai.is_some(),
         "database_configured": state.store.is_some(),
         "openai_configured": state.openai_configured,
         "elevenlabs_stt_configured": state.speech_configured,
@@ -215,7 +226,7 @@ async fn download_snapshot(State(state): State<AppState>, Path(id): Path<Uuid>) 
     Ok((headers, Body::from(snapshot.xlsx)).into_response())
 }
 
-struct ApiError(StatusCode, &'static str);
+pub(crate) struct ApiError(StatusCode, &'static str);
 
 impl From<StorageError> for ApiError {
     fn from(error: StorageError) -> Self {
@@ -242,7 +253,15 @@ mod tests {
     use tower::ServiceExt;
 
     fn app(path: PathBuf) -> Router {
-        router(AppState { store: None, static_dir: path, openai_configured: false, speech_configured: false, tts_configured: false })
+        router(AppState {
+            store: None,
+            static_dir: path,
+            openai_configured: false,
+            speech_configured: false,
+            tts_configured: false,
+            openai: None,
+            elevenlabs: None,
+        })
     }
 
     #[tokio::test]
@@ -328,4 +347,114 @@ mod tests {
         let navigation = Request::builder().uri("/").header("sec-fetch-site", "cross-site").body(Body::empty()).unwrap();
         assert_eq!(router.oneshot(navigation).await.unwrap().status(), StatusCode::OK);
     }
+}
+
+async fn library(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+    let repository = store(&state)?;
+    let mut files = Vec::new();
+    for file in repository.list_workbooks().await?.into_iter().take(50) {
+        if file.latest_version == 0 {
+            continue;
+        }
+        let snapshot = repository.snapshot_version(file.workbook_id, file.latest_version).await?;
+        let (wb, _) = gridcraft_engine::io::open_bytes(&file.title, &snapshot.xlsx)
+            .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "stored_workbook_invalid"))?;
+        let preview = wb
+            .active()
+            .map(|sheet| {
+                (0..6)
+                    .map(|r| {
+                        (0..5)
+                            .map(|c| json!(sheet.value(gridcraft_engine::core::CellRef::new(r, c)).display().chars().take(160).collect::<String>()))
+                            .collect()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.push(gridcraft_engine::workspace::LibraryFile {
+            workbook_id: file.workbook_id.to_string(),
+            title: file.title,
+            latest_version: file.latest_version,
+            source: "mock workspace storage".into(),
+            preview,
+        });
+    }
+    Ok(Json(files))
+}
+
+async fn download_version(State(state): State<AppState>, Path((id, version)): Path<(Uuid, i64)>) -> Result<Response, ApiError> {
+    let snapshot = store(&state)?.snapshot_version(id, version).await?;
+    let mut response = (
+        [(header::CONTENT_TYPE, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), (header::CACHE_CONTROL, "no-store")],
+        snapshot.xlsx,
+    )
+        .into_response();
+    response.headers_mut().insert(
+        "x-gridcraft-storage-version",
+        version.to_string().parse().map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid_version"))?,
+    );
+    response
+        .headers_mut()
+        .insert("x-gridcraft-sha256", snapshot.receipt.sha256.parse().map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid_digest"))?);
+    Ok(response)
+}
+
+async fn start_run(State(state): State<AppState>, Json(request): Json<gridcraft_engine::workspace::StartRun>) -> Result<impl IntoResponse, ApiError> {
+    let client = state.openai.as_ref().ok_or(ApiError(StatusCode::SERVICE_UNAVAILABLE, "openai_not_configured"))?;
+    let view = store(&state)?.start_run(request).await?;
+    let id = Uuid::parse_str(&view.run_id).map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_run_id"))?;
+    Ok(Json(store(&state)?.advance_run(id, client, None).await?))
+}
+async fn run_status(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(store(&state)?.run_view(id).await?))
+}
+async fn continue_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<gridcraft_engine::workspace::ToolContinuation>,
+) -> Result<impl IntoResponse, ApiError> {
+    let client = state.openai.as_ref().ok_or(ApiError(StatusCode::SERVICE_UNAVAILABLE, "openai_not_configured"))?;
+    Ok(Json(store(&state)?.advance_run(id, client, Some(request)).await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeRequest {
+    workbook_session_id: String,
+}
+async fn resume_run(State(state): State<AppState>, Path(id): Path<Uuid>, Json(request): Json<ResumeRequest>) -> Result<impl IntoResponse, ApiError> {
+    let client = state.openai.as_ref().ok_or(ApiError(StatusCode::SERVICE_UNAVAILABLE, "openai_not_configured"))?;
+    let view = store(&state)?.run_view(id).await?;
+    if view.workbook_session_id != request.workbook_session_id {
+        return Err(ApiError(StatusCode::CONFLICT, "editor_session_changed_start_a_new_run"));
+    }
+    Ok(Json(store(&state)?.advance_run(id, client, None).await?))
+}
+async fn transcribe(State(state): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Result<impl IntoResponse, ApiError> {
+    let client = state.elevenlabs.as_ref().ok_or(ApiError(StatusCode::SERVICE_UNAVAILABLE, "speech_not_configured"))?;
+    let mime =
+        headers.get(header::CONTENT_TYPE).and_then(|h| h.to_str().ok()).ok_or(ApiError(StatusCode::BAD_REQUEST, "audio_content_type_required"))?;
+    Ok(Json(client.transcribe(body.to_vec(), mime).await.map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "transcription_failed"))?))
+}
+async fn speak_run(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Response, ApiError> {
+    let client = state.elevenlabs.as_ref().ok_or(ApiError(StatusCode::SERVICE_UNAVAILABLE, "speech_not_configured"))?;
+    let view = store(&state)?.run_view(id).await?;
+    // Speak a deterministic verified outcome, not unverified model prose or supplied text.
+    let verified = view
+        .completed_actions
+        .iter()
+        .filter(|a| {
+            a.pointer("/result/applied").and_then(serde_json::Value::as_bool) == Some(true)
+                && a.pointer("/result/verification_error").is_none()
+                && a.pointer("/result/readback").is_some()
+        })
+        .count();
+    let text = if verified > 0 {
+        format!("{verified} workbook operation completed and read back. Review the cells and sources.")
+    } else if view.status == "complete" {
+        "The request finished. No verified workbook edits were made. Review the response and sources.".into()
+    } else {
+        return Err(ApiError(StatusCode::CONFLICT, "verified_outcome_not_available"));
+    };
+    let bytes = client.synthesize(&text).await.map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "synthesis_failed"))?;
+    Ok(([(header::CONTENT_TYPE, "audio/mpeg"), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
 }

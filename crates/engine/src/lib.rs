@@ -23,6 +23,7 @@ pub mod review_workflow;
 pub mod sample;
 pub mod selection;
 pub mod tables;
+pub mod workspace;
 
 use std::sync::Arc;
 

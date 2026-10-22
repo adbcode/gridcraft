@@ -1,6 +1,6 @@
 # Deterministic sales review fixture
 
-Updated: 2026-10-22. Status: pure Rust fixture and query contract; PostgreSQL storage is implemented in the server baseline.
+Updated: 2026-10-22. Status: pure Rust fixture/query contract with connected PostgreSQL, durable runs and browser snapshot coordination.
 
 The fixture in `crates/engine/src/review_workflow.rs` contains original synthetic order
 records. It needs no credentials, network service or vendor-authored workbook. The query
@@ -109,9 +109,10 @@ PostgreSQL storage for sales, explicit rules, immutable query evidence and workb
 Server comparisons reuse this fixture's pure query semantics; each stored answer includes
 the exact source rows, ingestion labels and rule context used at its source revision.
 Bounded imports change subsequent answers without rewriting earlier query evidence.
-Database snapshot versions remain distinct from browser change tokens. Browser upload/ack
-coordination and durable run/continuation storage remain future integration work; later
-browser edits must remain unsaved when an earlier snapshot is acknowledged. See
+Database snapshot versions remain distinct from browser change tokens. The connected browser
+now implements upload/receipt/ack coordination and the server persists durable run checkpoints;
+later browser edits remain unsaved when an earlier snapshot is acknowledged. The standalone
+pure RunState above remains an in-memory reference, separate from that server loop. See
 [service API](service-api.md) and [validation](validation.md) for actual scope and checks.
 
 ## Focused verification
@@ -124,4 +125,4 @@ calculation/undo, continuation matching, replay conflicts and provider-timeout r
 
 Revision history: 2026-10-21 — initial offline fixture, worksheet output, resume contract
 and unexecuted PostgreSQL schema. 2026-10-22 — replace the obsolete schema draft with the
-implemented server storage boundary and immutable evidence contract.
+implemented server storage boundary, immutable evidence, connected run and snapshot contracts.

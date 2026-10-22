@@ -36,6 +36,7 @@ pub fn start() {
                 Box::new(move |cc| {
                     let inbox: Inbox = Inbox::default();
                     let mut session = Session::new();
+                    let mut recovered_workspace = false;
                     // In host mode the parent sends the workbook to edit; no sample meanwhile.
                     let q = if app_bridge.is_some() { String::new() } else { query() };
                     if let Some(name) = q.split(['?', '&']).find_map(|kv| kv.strip_prefix("sample=")) {
@@ -47,7 +48,28 @@ pub fn start() {
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, cc.egui_ctx.clone());
                     }
+                    // Explicit samples/parent loads and recovered bytes take precedence.
+                    if app_bridge.is_none() && session.active().is_none() {
+                        let recovered = crate::workspace_client::restore(&mut session);
+                        recovered_workspace = recovered;
+                        if !recovered {
+                            match gridcraft_engine::workspace::demo_xlsx(gridcraft_engine::workspace::WEEKLY_ID) {
+                                Ok(bytes) => {
+                                    let _ = session.execute(
+                                        "file.open",
+                                        serde_json::json!({"name":"Weekly Sales.xlsx","base64":gridcraft_engine::io::base64_encode(&bytes)}),
+                                    );
+                                }
+                                Err(error) => log::error!("Default workbook failed: {error}"),
+                            }
+                        }
+                    }
                     let mut app = SheetApp::new(session, services);
+                    let workspace = if app_bridge.is_none() {
+                        Some(crate::workspace_client::Client::new(&mut app, cc.egui_ctx.clone(), recovered_workspace))
+                    } else {
+                        None
+                    };
                     app.ui.system_theme = true;
                     // Follow the browser's language, except a CJK one: the web build has no system
                     // CJK fonts (none are bundled), so that interface would render as tofu.
@@ -65,7 +87,7 @@ pub fn start() {
                         }
                         bridge.post_ready();
                     }
-                    Ok(Box::new(WebShell { app, inbox, bridge: app_bridge }))
+                    Ok(Box::new(WebShell { app, inbox, bridge: app_bridge, workspace }))
                 }),
             )
             .await;
@@ -93,6 +115,7 @@ struct WebShell {
     app: SheetApp,
     inbox: Inbox,
     bridge: Option<crate::host::Bridge>,
+    workspace: Option<crate::workspace_client::Client>,
 }
 
 impl eframe::App for WebShell {
@@ -113,6 +136,9 @@ impl eframe::App for WebShell {
             });
         }
         self.app.logic(ctx);
+        if let Some(workspace) = &mut self.workspace {
+            workspace.tick(&mut self.app, ctx);
+        }
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -274,7 +300,6 @@ fn mime_for(name: &str) -> &'static str {
 }
 
 /// Trigger a browser save dialog or download of `bytes` named after `name`.
-
 fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
     let window = web_sys::window().ok_or("no window")?;

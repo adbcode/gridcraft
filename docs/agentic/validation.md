@@ -1,6 +1,100 @@
-# Foundation and service validation
+# Workspace, service and foundation validation
 
 > Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
+
+## Connected workspace — 2026-10-22
+
+Implemented in the isolated `feat/agentic-workspace` worktree at
+`/private/tmp/gridcraft-agentic-workspace`, based on verified service commit
+`2bfd1f9cb9a876bd4773d0147d52f927ad106baf`. The original checkout remains on
+`feat/aiven-service-baseline`; its untracked `ca.pem`, files and baseline build were not
+modified or stopped. All new target/dist outputs belong to the isolated worktree.
+
+### Focused automated checks
+
+- Engine library: **318 passed**, including original XLSX generation/normal-load round-trip,
+  EUR/formula results and the existing live bridge/retry/undo/snapshot contracts.
+- UI acceptance: **19 passed** (9 workspace, 8 File menu, 2 host snapshot). Includes connected
+  dispatch/cancellation, stale tools preserving manual edits, mode/draft/history retention,
+  formula readback, exact late acknowledgements and platform file-picker invocation.
+- Server unit/local HTTP adapter tests: **20 passed**, plus **2 CLI configuration tests**.
+  Provider HTTP calls in these tests target loopback mocks, never actual accounts.
+- Real disposable PostgreSQL: **8 passed** (3 durable-run, 1 HTTP/storage, 4 transaction
+  suites). Covers restart/new-connection rule persistence, 65500 → 15500 cents, a source
+  correction to 14500 with unchanged earlier evidence, version allocation and exact concurrent
+  snapshot retries, durable provider-failure recovery, correlated tool retries, stale proposals
+  and refusal to save an unsolicited model-selected rule.
+- Native application and Rust server built. The browser compiled and linked to WASM, then
+  generated bindings with the lockfile-matched wasm-bindgen 0.2.129.
+- `cargo xtask wasm`: all 11 selected crates passed through a task-local Cargo wrapper that
+  adds `-Z build-std=std,panic_abort`. This is the documented temporary Homebrew toolchain
+  workaround, not a normal installed WASM target or a new repository requirement.
+- Strict server clippy passed. UI clippy passed with a command-local allowance for the
+  pre-existing `clippy::let_unit_value`; WASM clippy also passed with command-local allowances
+  for that warning and the existing dead-code warning. Repository lint policy was not weakened.
+- Assets: **34 attributed**, no added assets; layers: **17 crates**, no violations; parity
+  checklist current. No spreadsheet feature/parity uplift is claimed.
+
+`cargo xtask ci` was run again on this work. Formatting passed; strict workspace clippy
+stopped at the existing `crates/ui-egui/src/desktop_theme.rs:36` unit-value binding. Its
+remaining test/assets/layers/WASM/parity/keytips stages were skipped by that command. The
+separate checks above are actual evidence; full CI is still not green. The web build also
+retains the existing unused `Modified::At`/`Unknown` warning. No unrelated lint source changed.
+
+### Actual compiled browser acceptance
+
+Chrome loaded the real WASM editor from the Rust server on port **8081**. The service used
+an isolated PostgreSQL 17.11 cluster on loopback **55432** and temporary HTTP OpenAI/ElevenLabs
+mocks on **9091**. The PostgreSQL package was SHA-256 verified and relocated entirely under
+`/tmp`; no global toolchain/server installation, Aiven data or real credentials were used.
+
+Observed in the mounted editor:
+
+1. The default XLSX opens in Classic with Review, Orders, and Sources and Checks. The sheet
+   shows EUR 150 / 655 with working formulas and percentages. Browser inspection caught and
+   corrected column widths expressed in the wrong unit and an unavailable arrow glyph.
+2. Compare 655 → discard → explicitly remember the exclusion → compare 155 → Apply returns
+   the actual bridge readback and exactly one completed write. Sources retain query/rule IDs,
+   completed periods, row counts, revision and original records.
+3. After a manual cell edit, Classic/Agentic switching retained the workbook and history.
+   Native Undo restored C5's `=SUM(C2:C4)` formula and value **155**, confirmed by live inspection.
+4. A stale write after a keyboard edit returned `conflict`, retained the manual cell, and
+   recorded zero completed writes. The visible error remains available for acknowledgement.
+5. Delaying a committed upload response, editing while it was in flight, then releasing the
+   receipt left the later edit dirty. Reload restored the local dirty XLSX and cloud version.
+6. Reload with an outstanding write returned the previous run for inspection without applying
+   it. A fresh request used a new mounted session ID and read the preserved `manual` cell.
+7. Library search, exact-version attachment and open worked. Quarterly Forecast live reads
+   returned `Quarter`, **12000** revenue and **8400** cost; the start request carried its exact
+   workbook/version attachment. A local Inventory XLSX delivered by browser file drop opened
+   through the normal loader; live inspection read `Product` and **24** units. The native
+   rendered picker contract and actual Chrome file chooser also opened the local XLSX.
+8. Fake browser microphone capture produced editable `Compare sales` text without starting
+   a run. Send used the same context/inspect/write workflow and 15500-cent result as typing.
+   Cancelling a recording produced no transcription request or new run. The speech endpoint
+   returned generated silent MP3; playback/pause controls were exercised. This validates
+   capture/transport/control flow, not real speech recognition or voice quality.
+
+Screenshots of Classic, Agentic, proposed/applied results, library, live file reads, stale
+failure, late save acknowledgement, reload, transcript and playback were inspected. Browser
+harnesses, generated artifacts, private preview configuration, database files and screenshots
+remain outside committed source. No handwritten JS/TS was added to the product.
+
+### Remaining limits and handoff
+
+The running local preview is `http://127.0.0.1:8081/?webgl`, using local mock providers.
+It is not the Aiven deployment. Browser recovery is bounded same-tab session storage; it
+waits for unfinished interactions and restores content without native undo history. Competing
+cloud version conflicts preserve the original retry and local edits; an explicit new-version
+or save-copy resolution UI is a later iteration. The library currently lists the first 50
+files. Only XLSX attachments and the initially bounded bridge tools are exposed.
+
+Aiven image construction/deployment, PostgreSQL TLS on that service, real OpenAI tool calls,
+live ElevenLabs STT/TTS, public HTTPS permissions, release artifacts and broader platform
+checks remain unexecuted. Continuous voice agents remain deferred. Commit/push this branch,
+then have the user select it in Aiven before deployed testing; leave the baseline unchanged.
+
+The dated records below describe earlier states and are retained as historical evidence.
 
 ## Service baseline — 2026-10-22
 
@@ -166,5 +260,6 @@ The web build still reports the pre-existing unused `Modified::At`/`Unknown` var
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | major | Connected workspace; real disposable database, browser, generated files, recovery and mock voice checks |
 | 2026-10-22 | major | Rust service/configuration/provider checks, unchanged workbook contracts and explicit database/container/live integration gates |
 | 2026-10-21 | major | Offline engine/UI checks, actual browser bridge evidence and explicit live-service limits |

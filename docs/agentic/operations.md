@@ -1,12 +1,12 @@
-# Running the service baseline
+# Running the connected workspace
 
 > Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
 
 The Rust server serves the existing GridCraft WASM editor and its HTTP API from one
 origin. PostgreSQL stores application data and bounded workbook files. OpenAI Chat
-Completions and ElevenLabs use backend-only HTTP adapters. The editor's Agentic panel
-still runs its labelled local demo; adding credentials does not connect that panel
-to a durable model loop. Lovable remains a separate landing-page project.
+Completions and ElevenLabs use backend-only HTTP adapters. The browser panel connects
+when database/model configuration is available; the native/standalone panel labels its local
+demonstration. Lovable remains a separate landing-page project.
 
 ## Local setup
 
@@ -62,7 +62,7 @@ proxy. Use the server origin when checking backend routes.
 `GET /api/health/live` reports the running process. `GET /api/health/ready` requires the
 database, implemented schema and `index.html`; an unconfigured offline instance returns
 503 there. `GET /api/status` separates configured providers from unprobed connectivity
-and explicitly reports the offline UI and missing durable agent loop. Payloads and file
+and reports whether the connected durable workflow is configured. Payloads and file
 receipt handling are documented in [the service API](service-api.md).
 
 `make build-server` and `make build-web` can be run separately. `CARGO`, `TRUNK`,
@@ -142,3 +142,19 @@ a successful Aiven deployment or live provider response.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-22 | major | Local commands, private environment files and one-origin Aiven container baseline |
+
+
+## Isolated workspace development
+
+Use a separate worktree with its own target/dist output and `PORT=8081`; a standalone Trunk
+preview may use `--port 8772`. Keep an existing baseline checkout/build untouched. Configure
+a disposable loopback database for `make test-db`, and explicitly migrate/seed it. Local
+mock-provider acceptance can point the existing configurable HTTP adapters at loopback;
+never substitute mock acceptance for actual provider or Aiven validation.
+
+The new migration adds durable run checkpoints. `seed-demo` also creates the three mock
+library XLSX files without enabling a rule. Production seeding remains explicit. To try the
+first slice, open the server origin, select Agentic, compare sales, discard the initial
+preview, explicitly remember the exclusion, compare again, inspect/apply, manually edit,
+switch Classic/Agentic and Undo. Save acknowledges a specific committed snapshot; later
+changes remain dirty. See [workspace recovery](workspace.md) before testing interruptions.

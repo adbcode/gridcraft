@@ -1,6 +1,6 @@
 //! Server-only HTTP adapters. These do not execute tools or retry uncertain calls.
 //!
-//! The future durable run loop owns tool authorization, receipts and conversation
+//! The durable run loop owns tool authorization, receipts and conversation
 //! persistence. Keep the complete assistant message when returning tool results.
 
 use std::collections::BTreeSet;
@@ -102,11 +102,7 @@ pub struct Completion {
     pub finish_reason: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Transcript {
-    pub text: String,
-    pub language_code: Option<String>,
-}
+pub use gridcraft_engine::workspace::SpeechTranscript as Transcript;
 
 #[derive(Clone)]
 pub struct OpenAiClient {

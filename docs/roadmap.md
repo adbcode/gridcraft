@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-21 · **Change:** minor (fork agentic foundation; existing parity assessment unchanged) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-22 · **Change:** minor (connected agentic workspace; existing parity assessment unchanged) · **Target:** Microsoft Excel (Microsoft 365)
 
 Forward-looking plan. The one-page summary is [`ROADMAP.md`](../ROADMAP.md); the ranked work
 list is [`gaps.md`](gaps.md); numbers and method are in
@@ -11,9 +11,9 @@ list is [`gaps.md`](gaps.md); numbers and method are in
 This fork adds a Rust/egui Agentic panel to the existing application, an offline-testable live
 workbook bridge and deterministic sales-review contracts. Mode changes retain the same
 session. Its staged delivery and live service gates are in
-[agentic/delivery.md](agentic/delivery.md). Real Anthropic calls, durable rule/run memory,
-PostgreSQL persistence and Aiven deployment remain future work; the upstream parity
-estimates below are unchanged.
+[agentic/delivery.md](agentic/delivery.md). The connected browser now implements bounded
+OpenAI tools, durable rules/runs, exact snapshots, reload recovery and push-to-talk. Local
+mocks and disposable PostgreSQL validate contracts; Aiven and live provider gates remain.
 
 ## Current focus
 
@@ -121,6 +121,7 @@ to check our files, and Windows machines with the reported GPU drivers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Connected agentic workspace, original XLSX defaults, durable local-tested storage/tool loop and voice; existing parity estimates unchanged |
 | 2026-10-21 | minor | Existing-app Rust/egui Agentic foundation and future service integration plan; upstream parity estimates unchanged |
 | 2026-10-11 | minor | PivotTable calculated fields landed |
 | 2026-10-10 | minor | Current focus and M15 updated for the 10-10 merges |

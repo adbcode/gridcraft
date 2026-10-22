@@ -85,9 +85,9 @@ fn apply_verifies_live_formulas_and_native_undo_restores_manual_cells() {
     let uid = app.session.doc().unwrap().uid;
     let result = app.run("ui.agent.apply", json!({})).unwrap();
     assert_eq!(result["verified"], true);
-    assert_eq!(value(&app, "B5"), Value::number(15_000.0));
-    assert_eq!(value(&app, "C5"), Value::number(15_500.0));
-    assert_eq!(value(&app, "D5"), Value::number(500.0));
+    assert_eq!(value(&app, "B5"), Value::number(150.0));
+    assert_eq!(value(&app, "C5"), Value::number(155.0));
+    assert_eq!(value(&app, "D5"), Value::number(5.0));
     assert!(app.session.doc().unwrap().wb.active().unwrap().cell(CellRef::parse("D5").unwrap()).unwrap().formula.is_some());
     assert_eq!(app.session.doc().unwrap().undo.len(), 2, "one whole summary is one native operation");
     assert_eq!(app.agent.receipts.len(), 1);
@@ -116,6 +116,67 @@ fn unfinished_editor_draft_is_preserved_and_blocks_apply_and_undo() {
 }
 
 #[test]
+fn connected_requests_queue_once_and_stale_tool_writes_report_no_effect() {
+    use gridcraft_engine::workspace::{RunView, ToolDispatch};
+    use gridcraft_ui_egui::agent::WorkspaceAction;
+    let mut app = app();
+    app.agent.connected = true;
+    app.run("ui.agent.submit", json!({"text":"Compare sales"})).unwrap();
+    assert!(matches!(app.agent.outbox.as_slice(), [WorkspaceAction::Submit(_)]));
+    assert!(app.run("ui.agent.submit", json!({"text":"Again"})).is_err());
+    app.agent.outbox.clear();
+    app.agent.working = false;
+    let expected = app.agent.bridge.observe(&app.session).unwrap().identity;
+    app.agent.run = Some(RunView {
+        run_id: "run".into(),
+        workbook_session_id: "mounted-editor".into(),
+        status: "waiting_for_editor".into(),
+        pending: None,
+        message: String::new(),
+        completed_actions: vec![],
+        sources: vec![],
+    });
+    app.agent.pending_tool = Some(ToolDispatch {
+        tool_call_id: "write-1".into(),
+        method: "set_values".into(),
+        params: json!({"request_id":"write-1","expected":expected,"range":"A1","values":[[155]]}),
+    });
+    app.run("cell.set", json!({"cell":"A1","input":"manual correction"})).unwrap();
+    app.run("ui.agent.toggle", json!({"on":false})).unwrap();
+    app.run("ui.agent.toggle", json!({"on":true})).unwrap();
+    app.run("ui.agent.apply", json!({})).unwrap();
+    let Some(WorkspaceAction::Continue(receipt)) = app.agent.outbox.first() else { panic!("expected correlated continuation") };
+    assert!(receipt.result["error"].as_str().unwrap().contains("conflict"));
+    assert_eq!(receipt.tool_call_id, "write-1");
+    assert_eq!(value(&app, "A1"), Value::text("manual correction"));
+    assert!(app.agent.receipts.is_empty());
+    assert_eq!(app.session.doc().unwrap().undo.len(), 1);
+}
+
+#[test]
+fn connected_discard_returns_cancelled_receipt_and_does_not_touch_history() {
+    use gridcraft_engine::workspace::{RunView, ToolDispatch};
+    use gridcraft_ui_egui::agent::WorkspaceAction;
+    let mut app = app();
+    app.agent.run = Some(RunView {
+        run_id: "run".into(),
+        workbook_session_id: "editor".into(),
+        status: "waiting_for_editor".into(),
+        pending: None,
+        message: String::new(),
+        completed_actions: vec![],
+        sources: vec![],
+    });
+    app.agent.pending_tool = Some(ToolDispatch { tool_call_id: "write".into(), method: "set_values".into(), params: json!({}) });
+    assert!(app.run("ui.agent.dismiss", json!({})).is_err());
+    app.run("ui.agent.discard", json!({})).unwrap();
+    let Some(WorkspaceAction::Continue(receipt)) = app.agent.outbox.first() else { panic!("expected cancellation") };
+    assert_eq!(receipt.result["cancelled"], true);
+    assert_eq!(receipt.result["applied"], false);
+    assert!(app.session.doc().unwrap().undo.is_empty());
+}
+
+#[test]
 fn rendered_mode_toggle_and_demo_buttons_drive_the_command_workflow() {
     use egui_kittest::kittest::Queryable;
     let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 1000.0)).build_ui_state(
@@ -137,10 +198,35 @@ fn rendered_mode_toggle_and_demo_buttons_drive_the_command_workflow() {
     assert_eq!(harness.state().agent.preview.as_ref().unwrap().review.total().current_minor, 15_500);
     harness.get_by_label("Apply to workbook").click();
     harness.run_steps(2);
-    assert_eq!(value(harness.state(), "C5"), Value::number(15_500.0));
+    assert_eq!(value(harness.state(), "C5"), Value::number(155.0));
     assert_eq!(harness.state().session.doc().unwrap().uid, uid);
     harness.get_by_label("Classic").click();
     harness.run_steps(2);
     assert!(!harness.state().agent.enabled);
     assert_eq!(harness.state().session.doc().unwrap().uid, uid);
+}
+
+#[test]
+fn library_local_open_invokes_the_existing_platform_picker() {
+    use egui_kittest::kittest::Queryable;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut app = app();
+    let counter = calls.clone();
+    app.services.open_async = Some(Box::new(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }));
+    app.run("ui.agent.toggle", json!({"on":true})).unwrap();
+    app.run("ui.agent.files", json!({})).unwrap();
+    let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 1000.0)).build_ui_state(
+        |ui, app: &mut SheetApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        app,
+    );
+    harness.run_steps(5);
+    harness.get_by_label("Open local file").click();
+    harness.run_steps(2);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

@@ -2003,6 +2003,7 @@ dependencies = [
  "js-sys",
  "log",
  "rfd",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "wasm-bindgen",

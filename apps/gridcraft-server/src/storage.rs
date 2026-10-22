@@ -52,8 +52,9 @@ pub async fn migrate(pool: &PgPool) -> Result<()> {
 
 #[derive(Clone)]
 pub struct Store {
-    pool: PgPool,
-    workspace_id: Uuid,
+    pub(crate) pool: PgPool,
+    pub(crate) workspace_id: Uuid,
+    pub(crate) run_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +121,7 @@ pub struct QueryEvidence {
 
 impl Store {
     pub fn new(pool: PgPool, workspace_id: Uuid) -> Self {
-        Self { pool, workspace_id }
+        Self { pool, workspace_id, run_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())) }
     }
 
     /// A connection alone is insufficient: readiness also requires the executable
@@ -128,7 +129,7 @@ impl Store {
     pub async fn check_ready(&self) -> Result<()> {
         let _: i32 = sqlx::query_scalar("SELECT 1").fetch_one(&self.pool).await?;
         let migrated: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version=1 AND success)").fetch_one(&self.pool).await?;
+            sqlx::query_scalar("SELECT count(*)=2 FROM _sqlx_migrations WHERE version IN (1,3) AND success").fetch_one(&self.pool).await?;
         if !migrated {
             return Err(StorageError::Migration);
         }
@@ -138,6 +139,7 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query("SELECT state FROM review_agent_runs LIMIT 0").execute(&self.pool).await?;
         Ok(())
     }
 
@@ -292,6 +294,25 @@ impl Store {
     /// source set fails rather than producing a silently truncated aggregate. Full source
     /// counts include records excluded by date/status/rules, matching the fixture contract.
     pub async fn compare(&self, periods: ComparisonPeriods) -> Result<SalesReview> {
+        self.compare_with_id(periods, Uuid::new_v4()).await
+    }
+
+    /// A run tool's stable query ID makes a crash after evidence commit recoverable.
+    pub async fn compare_with_id(&self, periods: ComparisonPeriods, query_id: Uuid) -> Result<SalesReview> {
+        match self.query_evidence(query_id).await {
+            Ok(evidence) => {
+                let review = compare_sales(&evidence.source_records, &evidence.rule_context, &query_id.to_string(), periods)?;
+                if serde_json::to_value(&review).map_err(|_| StorageError::CorruptData)? != evidence.result {
+                    return Err(StorageError::Conflict);
+                }
+                if review.provenance().periods != periods {
+                    return Err(StorageError::Conflict);
+                }
+                return Ok(review);
+            }
+            Err(StorageError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
         // Validate periods before any database work.
         compare_sales(&[], &[], "validate", periods)?;
         let mut tx = self.pool.begin().await?;
@@ -315,7 +336,6 @@ impl Store {
             .iter()
             .map(|row| Ok((row.try_get::<String, _>("record_id")?, row.try_get::<String, _>("origin")?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let query_id = Uuid::new_v4();
         let result = compare_sales(&records, &rules, &query_id.to_string(), periods)?;
         // A first query of an empty workspace is valid and still has durable provenance.
         sqlx::query("INSERT INTO review_workspaces (workspace_id) VALUES ($1) ON CONFLICT DO NOTHING")
@@ -496,6 +516,50 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?
         .ok_or(StorageError::NotFound)?;
+        snapshot_from_row(&row)
+    }
+
+    /// Explicit demo-library initialization. Never overwrite an existing workbook/version.
+    pub async fn seed_files(&self) -> Result<()> {
+        for (key, title) in gridcraft_engine::workspace::demo_catalog() {
+            let id = Uuid::parse_str(key).map_err(|_| StorageError::CorruptData)?;
+            let workbook = self.create_workbook(id, title).await?;
+            if workbook.latest_version > 0 {
+                continue;
+            }
+            let xlsx = gridcraft_engine::workspace::demo_xlsx(key).map_err(|_| StorageError::CorruptData)?;
+            let result = self
+                .save_snapshot(SnapshotUpload {
+                    workbook_id: id,
+                    xlsx,
+                    metadata: SnapshotMetadata {
+                        export_id: "mock-library-v1".into(),
+                        workbook_session_id: "explicit-demo-seed".into(),
+                        expected_version: 0,
+                        identity: Identity {
+                            document_id: 1,
+                            sheet_index: 0,
+                            sheet_name: if key == gridcraft_engine::workspace::WEEKLY_ID { "Review" } else { "Summary" }.into(),
+                            change_token: 1,
+                        },
+                    },
+                })
+                .await;
+            if !matches!(result, Ok(_) | Err(StorageError::Conflict)) {
+                result?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn snapshot_version(&self, id: Uuid, version: i64) -> Result<StoredSnapshot> {
+        let row = sqlx::query("SELECT * FROM review_snapshots WHERE workspace_id=$1 AND workbook_id=$2 AND snapshot_version=$3")
+            .bind(self.workspace_id)
+            .bind(id)
+            .bind(version)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
         snapshot_from_row(&row)
     }
 

@@ -13,8 +13,11 @@
 - Tests: `speech_fake_elevenlabs` (2: trimmed transcript, empty/unsupported audio rejected; bounded
   synthesis, missing voice → 503) and 2 UI tests (voice → editable draft → typed path → spoken
   outcome; typed requests never spoken; cancelled recording ignored).
-- Live ElevenLabs smoke against the local service: see `ckpt4-*` evidence (synthesize → MP3,
-  transcribe that MP3 back to text, oversized text → 422).
+- Live ElevenLabs smoke against the local service: **blocked by the provider account**. Both
+  speech-to-text and text-to-speech returned HTTP 401 `detected_unusual_activity` ("Free Tier access
+  has been disabled ... upgrade to a paid subscription"); the service mapped it to 502
+  `provider_rejected_credentials` and the UI keeps the draft/written answer. Oversized synthesis
+  text → 422 was confirmed live. A working ElevenLabs key is still required for the voice gate.
 
 ## Save receipts and reload recovery (checkpoint 3) — 2026-10-22
 

@@ -214,6 +214,10 @@ impl SalesReview {
         &self.provenance
     }
 
+    pub fn rebuild_from_evidence(records: &[Sale], rules: &[ReviewRule], query_id: &str, periods: ComparisonPeriods) -> ReviewResult<Self> {
+        compare_sales(records, rules, query_id, periods)
+    }
+
     /// Five-column rectangular command payload, anchored at A1. Monetary cells are integer
     /// EUR cents, and generated formulas recalculate if a user edits the summary values.
     /// All external text is forced to literal cell text, including formula-like labels.

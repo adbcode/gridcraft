@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use gridcraft_engine::agent_bridge::Identity;
+use gridcraft_engine::agent_protocol::AttachmentRef;
 use gridcraft_engine::review_workflow::{
     ComparisonPeriods, Currency, MAX_RECORDS, MAX_RULES, ReviewError, ReviewRule, Sale, SaleStatus, SalesReview, compare_sales, demo_sales,
 };
@@ -52,8 +53,8 @@ pub async fn migrate(pool: &PgPool) -> Result<()> {
 
 #[derive(Clone)]
 pub struct Store {
-    pool: PgPool,
-    workspace_id: Uuid,
+    pub(crate) pool: PgPool,
+    pub(crate) workspace_id: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +63,30 @@ pub struct Workbook {
     pub workbook_id: Uuid,
     pub title: String,
     pub latest_version: i64,
+    pub origin: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileEntry {
+    pub workbook_id: Uuid,
+    pub title: String,
+    pub origin: String,
+    pub latest_version: i64,
+    pub sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FilePreview {
+    pub workbook_id: Uuid,
+    pub version: i64,
+    pub sheets: Vec<FileSheetPreview>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FileSheetPreview {
+    pub name: String,
+    pub cells: Vec<Vec<serde_json::Value>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +208,7 @@ impl Store {
         if changed > 0 {
             self.advance_source_revision(&mut tx).await?;
         }
+        self.seed_mock_workbooks(&mut tx).await?;
         tx.commit().await?;
         Ok(fixture.len())
     }
@@ -369,11 +395,12 @@ impl Store {
         validate_text(title, "workbook title")?;
         let mut tx = self.pool.begin().await?;
         self.lock_workspace(&mut tx).await?;
-        if let Some(row) = sqlx::query("SELECT workbook_id,title,latest_version FROM review_workbooks WHERE workspace_id=$1 AND workbook_id=$2")
-            .bind(self.workspace_id)
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?
+        if let Some(row) =
+            sqlx::query("SELECT workbook_id,title,latest_version,origin FROM review_workbooks WHERE workspace_id=$1 AND workbook_id=$2")
+                .bind(self.workspace_id)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
         {
             let workbook = workbook_from_row(&row)?;
             if workbook.title != title {
@@ -394,12 +421,12 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(Workbook { workbook_id: id, title: title.into(), latest_version: 0 })
+        Ok(Workbook { workbook_id: id, title: title.into(), latest_version: 0, origin: "user".into() })
     }
 
     pub async fn list_workbooks(&self) -> Result<Vec<Workbook>> {
         let rows = sqlx::query(
-            "SELECT workbook_id,title,latest_version FROM review_workbooks WHERE workspace_id=$1 ORDER BY created_at,workbook_id LIMIT $2",
+            "SELECT workbook_id,title,latest_version,origin FROM review_workbooks WHERE workspace_id=$1 ORDER BY created_at,workbook_id LIMIT $2",
         )
         .bind(self.workspace_id)
         .bind(MAX_WORKBOOKS.saturating_add(1))
@@ -409,6 +436,80 @@ impl Store {
             return Err(StorageError::LimitExceeded);
         }
         rows.iter().map(workbook_from_row).collect()
+    }
+
+    pub async fn list_files(&self, query: &str) -> Result<Vec<FileEntry>> {
+        if query.len() > 256 || query.chars().any(char::is_control) {
+            return Err(StorageError::InvalidInput("file search"));
+        }
+        let rows = sqlx::query(
+            "SELECT w.workbook_id,w.title,w.origin,w.latest_version,
+                    encode(s.sha256,'hex') AS sha256
+             FROM review_workbooks w
+             LEFT JOIN review_snapshots s ON s.workspace_id=w.workspace_id
+               AND s.workbook_id=w.workbook_id AND s.snapshot_version=w.latest_version
+             WHERE w.workspace_id=$1 AND w.title ILIKE $2
+             ORDER BY w.created_at,w.workbook_id LIMIT 101",
+        )
+        .bind(self.workspace_id)
+        .bind(format!("%{query}%"))
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.len() > 100 {
+            return Err(StorageError::LimitExceeded);
+        }
+        rows.iter()
+            .map(|row| {
+                Ok(FileEntry {
+                    workbook_id: row.try_get("workbook_id")?,
+                    title: row.try_get("title")?,
+                    origin: row.try_get("origin")?,
+                    latest_version: row.try_get("latest_version")?,
+                    sha256: row.try_get("sha256")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn snapshot(&self, id: Uuid, version: i64) -> Result<StoredSnapshot> {
+        if version <= 0 {
+            return Err(StorageError::InvalidInput("snapshot version"));
+        }
+        let row = sqlx::query("SELECT * FROM review_snapshots WHERE workspace_id=$1 AND workbook_id=$2 AND snapshot_version=$3")
+            .bind(self.workspace_id)
+            .bind(id)
+            .bind(version)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+        snapshot_from_row(&row)
+    }
+
+    pub async fn preview_snapshot(&self, id: Uuid, version: i64) -> Result<FilePreview> {
+        let snapshot = self.snapshot(id, version).await?;
+        let (workbook, _) = gridcraft_engine::io::open_bytes("preview.xlsx", &snapshot.xlsx).map_err(|_| StorageError::CorruptData)?;
+        let mut sheets = Vec::new();
+        for sheet in workbook.sheets.iter().take(32) {
+            let mut cells = Vec::new();
+            for row in 0..20 {
+                let mut values = Vec::new();
+                for column in 0..8 {
+                    values.push(
+                        serde_json::to_value(sheet.value(gridcraft_engine::core::CellRef::new(row, column)))
+                            .map_err(|_| StorageError::CorruptData)?,
+                    );
+                }
+                cells.push(values);
+            }
+            sheets.push(FileSheetPreview { name: sheet.name.clone(), cells });
+        }
+        Ok(FilePreview { workbook_id: id, version, sheets })
+    }
+
+    pub async fn attachment_matches(&self, attachment: &AttachmentRef) -> Result<bool> {
+        let id = Uuid::parse_str(&attachment.workbook_id).map_err(|_| StorageError::InvalidInput("attachment workbook ID"))?;
+        let snapshot = self.snapshot(id, attachment.version).await?;
+        Ok(snapshot.receipt.sha256.eq_ignore_ascii_case(&attachment.sha256))
     }
 
     /// The workbook row serializes version allocation. Exact duplicate lookup deliberately
@@ -533,6 +634,42 @@ impl Store {
         }
         rows.iter().map(rule_from_row).collect()
     }
+
+    async fn seed_mock_workbooks(&self, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+        let entries = [
+            (Uuid::from_u128(0x11111111111111111111111111111111), "Weekly Sales.xlsx", gridcraft_engine::demo_files::weekly_sales_xlsx()),
+            (Uuid::from_u128(0x22222222222222222222222222222222), "Quarterly Forecast.xlsx", gridcraft_engine::demo_files::quarterly_forecast_xlsx()),
+            (Uuid::from_u128(0x33333333333333333333333333333333), "Inventory.xlsx", gridcraft_engine::demo_files::inventory_xlsx()),
+        ];
+        for (id, title, bytes) in entries {
+            let bytes = bytes.map_err(|_| StorageError::CorruptData)?;
+            sqlx::query(
+                "INSERT INTO review_workbooks (workspace_id,workbook_id,title,latest_version,origin)
+                 VALUES ($1,$2,$3,1,'mock') ON CONFLICT (workspace_id,workbook_id) DO NOTHING",
+            )
+            .bind(self.workspace_id)
+            .bind(id)
+            .bind(title)
+            .execute(&mut **tx)
+            .await?;
+            let digest = Sha256::digest(&bytes).to_vec();
+            sqlx::query(
+                "INSERT INTO review_snapshots
+                 (workspace_id,workbook_id,snapshot_version,expected_version,export_id,workbook_session_id,exported_identity,xlsx,sha256)
+                 VALUES ($1,$2,1,0,$3,$4,$5,$6,$7) ON CONFLICT (workspace_id,workbook_id,snapshot_version) DO NOTHING",
+            )
+            .bind(self.workspace_id)
+            .bind(id)
+            .bind(format!("mock-seed-{id}"))
+            .bind("mock-seed")
+            .bind(serde_json::json!({"document_id":1,"sheet_index":0,"sheet_name":"Sheet1","change_token":1}))
+            .bind(bytes)
+            .bind(digest)
+            .execute(&mut **tx)
+            .await?;
+        }
+        Ok(())
+    }
 }
 
 fn validate_text(value: &str, field: &'static str) -> Result<()> {
@@ -631,7 +768,12 @@ fn sale_from_row(row: &PgRow) -> Result<Sale> {
 }
 
 fn workbook_from_row(row: &PgRow) -> Result<Workbook> {
-    Ok(Workbook { workbook_id: row.try_get("workbook_id")?, title: row.try_get("title")?, latest_version: row.try_get("latest_version")? })
+    Ok(Workbook {
+        workbook_id: row.try_get("workbook_id")?,
+        title: row.try_get("title")?,
+        latest_version: row.try_get("latest_version")?,
+        origin: row.try_get("origin")?,
+    })
 }
 
 fn snapshot_from_row(row: &PgRow) -> Result<StoredSnapshot> {

@@ -94,6 +94,39 @@ pub fn weekly_sales_xlsx() -> Result<Vec<u8>> {
     crate::io::save_bytes(&workbook, "Weekly Sales.xlsx")
 }
 
+pub fn quarterly_forecast_xlsx() -> Result<Vec<u8>> {
+    simple_demo_xlsx(
+        "Quarterly Forecast.xlsx",
+        vec![
+            vec![json!("Quarter"), json!("Forecast"), json!("Actual"), json!("Variance")],
+            vec![json!("Q1"), json!(120_000.0), json!(118_500.0), json!("=C2-B2")],
+            vec![json!("Q2"), json!(135_000.0), json!(141_250.0), json!("=C3-B3")],
+            vec![json!("Q3"), json!(150_000.0), json!(149_800.0), json!("=C4-B4")],
+        ],
+    )
+}
+
+pub fn inventory_xlsx() -> Result<Vec<u8>> {
+    simple_demo_xlsx(
+        "Inventory.xlsx",
+        vec![
+            vec![json!("SKU"), json!("Description"), json!("On hand"), json!("Reorder point"), json!("Status")],
+            vec![json!("GC-100"), json!("Notebook"), json!(42), json!(20), json!("OK")],
+            vec![json!("GC-200"), json!("Marker"), json!(8), json!(12), json!("Reorder")],
+            vec![json!("GC-300"), json!("Folder"), json!(31), json!(15), json!("OK")],
+        ],
+    )
+}
+
+fn simple_demo_xlsx(name: &str, values: Vec<Vec<Json>>) -> Result<Vec<u8>> {
+    let mut session = Session::new();
+    session.new_workbook();
+    session.execute("range.setValues", json!({"range": "A1", "values": values}))?;
+    session.execute("home.columnWidth", json!({"cols": "A:E", "width": 120}))?;
+    let workbook = (*session.doc()?.wb).clone();
+    crate::io::save_bytes(&workbook, name)
+}
+
 fn literal(text: &str) -> Json {
     json!(format!("'{text}"))
 }

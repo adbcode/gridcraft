@@ -1,6 +1,32 @@
 # Workspace, service and foundation validation
 
-> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
+> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: minor
+
+## Migration startup diagnostics — 2026-10-22
+
+Verified on local PostgreSQL 14 using an explicitly disposable database, not Aiven:
+
+- `make check`: formatting, locked server compilation and strict server/all-target clippy passed.
+- `make test`'s equivalent `cargo test --locked -p gridcraft-server`: **24 passed**;
+  the opt-in database tests were run separately below.
+- `make test-db`: all **12 passed**, including four new migration regressions: version 1 → 3
+  upgrade/repeat, schema conflict and lock release, checksum mismatch without history repair,
+  and missing-database diagnostics without leaking its name. New schema-changing tests use
+  random isolated schemas and remove them on success.
+- Compiled server CLI: **9 scenarios passed** — successful/repeated migrations, verified TLS
+  with multiline PEM, literal newline escapes, bad password, missing database, untrusted CA,
+  hostname mismatch, invalid PEM and connection refusal. Failure output was checked for
+  credential/database-name leakage; no raw driver messages are retained by diagnostics.
+- `cargo xtask ci`: formatting and strict workspace clippy passed; workspace tests stopped at
+  unchanged UI test `comments_pane::review_has_a_single_show_comments_button` (expected one
+  New Comment tooltip, found zero). The same test failed when rerun independently; no UI
+  code or test was changed. This is **not** a green full CI result.
+- Assets, dependency layers, WASM compilation, generated parity and keytips checks passed independently.
+
+No production root cause or successful Aiven deployment is claimed. The old generic log
+discards the underlying error. Deploy this diagnostics build, retain `verify-full` and inspect
+the next startup error before altering migration history. The container asset path must be
+`/app/web`, not `app/web`; that is separate from database migration startup.
 
 ## Connected workspace — 2026-10-22
 
@@ -260,6 +286,7 @@ The web build still reports the pre-existing unused `Modified::At`/`Unknown` var
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Local migration/TLS/failure diagnostics evidence and unchanged full-CI UI failure; Aiven remains unverified |
 | 2026-10-22 | major | Connected workspace; real disposable database, browser, generated files, recovery and mock voice checks |
 | 2026-10-22 | major | Rust service/configuration/provider checks, unchanged workbook contracts and explicit database/container/live integration gates |
 | 2026-10-21 | major | Offline engine/UI checks, actual browser bridge evidence and explicit live-service limits |

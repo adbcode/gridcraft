@@ -1,6 +1,6 @@
 # Running the service baseline
 
-> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
+> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: minor
 
 The Rust server serves the existing GridCraft WASM editor and its HTTP API from one
 origin. PostgreSQL stores application data and bounded workbook files. OpenAI Chat
@@ -127,7 +127,11 @@ describes using an existing service.
 Set the remaining values in Runtime's environment configuration. Mark
 `OPENAI_API_KEY`, `ELEVENLABS_API_KEY` and manually supplied database credentials as
 **Secret**. Set the Aiven project CA through `DATABASE_SSL_ROOT_CERT_PEM` and retain
-`DATABASE_SSL_MODE=verify-full`. Keep the image's listener and asset-path defaults.
+`DATABASE_SSL_MODE=verify-full`. Paste the complete project CA certificate with real
+line breaks and its `BEGIN CERTIFICATE` / `END CERTIFICATE` lines, not a path, quoted
+string or literal `\n` escapes. Keep the image's listener and asset-path defaults:
+`GRIDCRAFT_BIND=0.0.0.0` and `GRIDCRAFT_STATIC_DIR=/app/web` (leading slash required;
+`app/web` resolves to `/app/app/web` under the container's `/app` working directory).
 An environment change redeploys the previously selected commit; deploying newer code
 requires **Actions → Deploy latest commit**. See
 [Runtime variables](https://aiven.io/docs/products/runtime/secrets-and-variables) and
@@ -138,8 +142,42 @@ PostgreSQL writes and file reloads before connecting live model or voice actions
 Container construction, an available key and local HTTP mocks are separate from
 a successful Aiven deployment or live provider response.
 
+### Diagnosing startup migration failures
+
+Startup migrations open a bounded, dedicated connection using the configured TLS
+options. Logs identify the failing phase, migration version (when known) and SQLSTATE
+(for PostgreSQL errors), but never print driver messages, SQL, credentials or database
+identifiers. HTTP storage errors remain generic. `check-config` only validates local
+settings; it cannot prove a database connection or certificate handshake works.
+
+| Diagnostic | Check before redeploying |
+|---|---|
+| Connection / TLS verification or TLS/protocol negotiation | Actual PostgreSQL service hostname, current project CA and PEM line breaks; retain `verify-full` |
+| Connection / network failure or timeout | PostgreSQL service running, correct host/port and Runtime-to-database network access |
+| SQLSTATE `28P01` / `28000` | Database credentials and access policy; URI-encode special characters in passwords |
+| SQLSTATE `3D000` | Database name in the service connection URI |
+| SQLSTATE `42501` | Migration role's schema/table creation and migration-lock privileges |
+| SQLSTATE `42P07` / `42710` | Existing objects versus `_sqlx_migrations`; do not drop customer tables to force startup |
+| Checksum mismatch / missing migration | Deploy the matching immutable migration history; do not delete or rewrite `_sqlx_migrations` |
+
+This branch (`feat/agentic-workspace`) embeds migration versions 1 and 2. The separate
+`feat/agentic-workspace-connected` branch embeds versions 1 and 3. Switching between
+them against an already migrated database can fail history validation; do not switch
+branches or rewrite history as a diagnostic workaround. This change preserves both
+SQL files on the workspace branch byte-for-byte.
+
+If `_sqlx_migrations` is absent from every schema in the database used by Runtime,
+there is no recorded migration history to conflict with. Investigate the connection
+and migration setup first, verifying that a query editor uses the same database and
+role as Runtime. The application's public allowlist does not establish PostgreSQL-side
+network access. A generic `database migration failed` from an older build does not
+establish that migration SQL ran. Deploy the diagnostics build on the intended branch
+and inspect its next startup log before changing schema or weakening TLS. Model/voice
+settings are unrelated: no provider is contacted during migrations.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Secret-safe startup diagnostics for the workspace migration history, CA formatting and absolute container asset path |
 | 2026-10-22 | major | Local commands, private environment files and one-origin Aiven container baseline |

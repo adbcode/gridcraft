@@ -1,6 +1,37 @@
 # Foundation and service validation
 
-> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
+> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: minor
+
+## Workspace migration startup diagnostics — 2026-10-22
+
+The diagnostics port targets `feat/agentic-workspace` and preserves its migration
+versions 1 and 2 unchanged. Regression coverage checks the version 1 → 2 upgrade and
+repeat startup, schema conflicts and lock release, checksum mismatch without rewriting
+history, and missing-database diagnostics without disclosing its name. Unit tests cover
+fixed safe messages, SQLSTATE filtering and migration-version reporting.
+
+Observed verification on this branch used a fresh, explicitly disposable local
+PostgreSQL 14 database (`gridcraft_workspace_diagnostics_test`) over the Unix socket;
+the connected-branch database and Aiven were not used.
+
+- `cargo test --locked -p gridcraft-server --lib storage::tests::migration_diagnostics`:
+  2 passed.
+- `cargo test --locked -p gridcraft-server --test migrations_postgres -- --ignored
+  --test-threads=1`: 4 passed, covering migration versions `[1, 2]`, repeat startup,
+  conflict/lock recovery, immutable checksum history and safe missing-database errors.
+- `make check`: formatting, server check and strict clippy passed.
+- `cargo test --locked -p gridcraft-server`: 26 passed; 10 opt-in PostgreSQL tests
+  were ignored in this provider-free run.
+- `make test-db`: all 10 opt-in PostgreSQL tests passed against the fresh local
+  database, including migration diagnostics and the server storage/service tests.
+- `cargo xtask ci`: all 8 repository gate steps passed, including WASM.
+
+No production root cause or successful Aiven deployment is claimed. The supplied
+database inspection showed no migration-history table and allowed public-schema
+creation for the query-editor role; Runtime's database/role, connection and TLS settings
+still require verification. Retain `verify-full` and inspect the diagnostic startup log
+before altering database history. Correcting the container asset path to `/app/web`
+addresses a separate readiness/static-serving issue, not migration startup.
 
 ## Voice (checkpoint 4) — 2026-10-22
 
@@ -220,6 +251,7 @@ The web build still reports the pre-existing unused `Modified::At`/`Unknown` var
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Workspace-branch startup diagnostic coverage and explicit Aiven verification limits |
 | 2026-10-22 | major | Checkpoint 4 bounded speech routes, browser recording and verified spoken outcomes |
 | 2026-10-22 | major | Checkpoint 3 save receipts, exact retry/conflict and reload recovery |
 | 2026-10-22 | major | Checkpoint 2 durable runs, fake-provider/DB/UI tests and live OpenAI smoke |

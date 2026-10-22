@@ -650,6 +650,12 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                     invoke(app, "ui.agent.submit", json!({}));
                 }
             });
+            // Status-only outcomes (voice, save, recovery) stay visible when no response card is open.
+            if !app.agent.card_visible
+                && let Some(status) = &app.agent.status
+            {
+                ui.add(egui::Label::new(egui::RichText::new(status).small().color(t.text_dim)).wrap());
+            }
         });
     });
 }
@@ -696,6 +702,10 @@ fn cell_text(value: &Json) -> String {
     let text = match value {
         Json::Null => String::new(),
         Json::String(text) => text.clone(),
+        Json::Object(map) => match map.get("v") {
+            Some(inner) => return cell_text(inner),
+            None => value.to_string(),
+        },
         other => other.to_string(),
     };
     text.chars().take(24).collect()

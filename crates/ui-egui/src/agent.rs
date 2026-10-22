@@ -26,6 +26,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.agent.expand", "Expand Agent Composer", "{on?: bool}; expand or collapse the composer"),
     ("ui.agent.rules", "Show Agent Rules", "{open?: bool}; open or close remembered rules"),
     ("ui.agent.files", "Show Agent Files", "{open?: bool}; open or close the cloud file library"),
+    ("ui.agent.save", "Save to Cloud Library", "{}; exact export, committed receipt, then acknowledgement; retries the same export"),
     ("ui.agent.retry", "Retry Agent Request", "{}; re-sends the identical failed request"),
     ("ui.agent.fileSearch", "Search Cloud Files", "{q: string}; connected mode only"),
     ("ui.agent.filePreview", "Preview Cloud File", "{workbook_id: string}; first rows of the latest version"),
@@ -199,6 +200,7 @@ fn execute(state: &mut State, app: &mut SheetApp, id: &str, params: &Json) -> Re
             Ok(json!({"open": state.files_open}))
         }
         "ui.agent.retry" => agent_remote::retry(state, app),
+        "ui.agent.save" => agent_remote::save(state, app),
         "ui.agent.fileSearch" => {
             let query = params.get("q").and_then(Json::as_str).ok_or("q is required")?;
             agent_remote::search_files(state, app, query)
@@ -395,9 +397,22 @@ pub fn header(app: &mut SheetApp, ui: &mut egui::Ui) {
                         .color(t.text_dim),
                 );
                 ui.label(egui::RichText::new(connection_label(&app.agent)).small().color(t.accent));
+                if agent_remote::connected(&app.agent) {
+                    let cloud = agent_remote::active_cloud(&app.agent, app).map_or("Not in cloud".to_string(), |c| format!("Cloud v{}", c.version));
+                    ui.label(egui::RichText::new(cloud).small().color(t.text_dim));
+                    if let Some(error) = app.agent.remote.save_error.clone() {
+                        ui.label(egui::RichText::new("Not saved").small().color(t.danger)).on_hover_text(error);
+                    }
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Classic").clicked() {
                         invoke(app, "ui.agent.toggle", json!({"on": false}));
+                    }
+                    if agent_remote::connected(&app.agent) {
+                        let can_save = !app.host_busy() && !agent_remote::saving(&app.agent);
+                        if ui.add_enabled(can_save, egui::Button::new("Save")).on_hover_text("Save a new version to the cloud library").clicked() {
+                            invoke(app, "ui.agent.save", json!({}));
+                        }
                     }
                     let can_undo = app.session.active().is_some_and(|doc| !doc.undo.is_empty()) && !app.host_busy();
                     if ui.add_enabled(can_undo, egui::Button::new("Undo")).clicked() {

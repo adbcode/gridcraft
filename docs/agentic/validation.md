@@ -2,6 +2,22 @@
 
 > Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
 
+## Save receipts and reload recovery (checkpoint 3) — 2026-10-22
+
+- Agentic **Save** (`ui.agent.save`, connected mode): registers a workbook UUID on first save,
+  captures one bridge snapshot, exports those exact bytes, uploads them with the expected version
+  and marks the document saved only after the committed receipt (matching export ID, identity and
+  workbook) and the editor's acknowledgement of that capture. Later edits stay unsaved.
+- Network failure re-sends the identical export (same export ID, metadata and bytes); HTTP 409
+  reports a version conflict and leaves the workbook edited.
+- The workbook binding, run ID and session ID persist in browser storage. On reload the editor
+  downloads the latest committed version, opens it through the normal loader, waits for that
+  correlated open before agent actions are enabled, then fetches the stored run (interrupted runs
+  offer Retry → resume).
+- UI tests: 16 passed (3 new: receipt/ack with later edits kept; identical retry then conflict;
+  reload recovery then run). Live service contract checked with curl against the local service:
+  receipt fields, exact retry 200, stale expected version 409, latest download version/SHA headers.
+
 ## Connected harness (checkpoint 2) — 2026-10-22
 
 - `cargo xtask ci`: all 8 steps passed (fmt, clippy, test, assets, layers, wasm, parity, keytips).
@@ -187,6 +203,7 @@ The web build still reports the pre-existing unused `Modified::At`/`Unknown` var
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | major | Checkpoint 3 save receipts, exact retry/conflict and reload recovery |
 | 2026-10-22 | major | Checkpoint 2 durable runs, fake-provider/DB/UI tests and live OpenAI smoke |
 | 2026-10-22 | major | Rust service/configuration/provider checks, unchanged workbook contracts and explicit database/container/live integration gates |
 | 2026-10-21 | major | Offline engine/UI checks, actual browser bridge evidence and explicit live-service limits |

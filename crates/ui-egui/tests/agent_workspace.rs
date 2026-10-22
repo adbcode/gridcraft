@@ -338,4 +338,115 @@ mod connected {
         );
         assert!(app.agent.remote.attachments.is_empty());
     }
+
+    fn connected_with_inbox(api: &ScriptedApi) -> (SheetApp, gridcraft_ui_egui::Inbox) {
+        let inbox = gridcraft_ui_egui::Inbox::default();
+        let mut session = Session::new();
+        session.new_workbook();
+        let services = Services { agent_api: Some(Box::new(api.clone())), inbox: Some(inbox.clone()), ..Services::default() };
+        let mut app = SheetApp::new(session, services);
+        poll_at(&mut app, 0.0);
+        poll_at(&mut app, 0.0);
+        (app, inbox)
+    }
+
+    fn open_from_inbox(app: &mut SheetApp, inbox: &gridcraft_ui_egui::Inbox) {
+        let items: Vec<(String, Vec<u8>)> = std::mem::take(&mut *inbox.lock().unwrap());
+        assert_eq!(items.len(), 1);
+        for (name, bytes) in items {
+            let b64 = gridcraft_engine::io::base64_encode(&bytes);
+            app.run("file.open", json!({"name": name, "base64": b64})).unwrap();
+        }
+    }
+
+    fn receipt(request: &ApiRequest, workbook: &str, version: i64) -> Json {
+        let upload = request.upload.clone().unwrap();
+        assert!(!upload.bytes.is_empty());
+        let metadata: Json = serde_json::from_str(&upload.metadata).unwrap();
+        json!({"workbook_id": workbook, "export_id": metadata["export_id"], "workbook_session_id": metadata["workbook_session_id"],
+               "identity": metadata["identity"], "storage_version": version, "sha256": "00", "byte_length": upload.bytes.len()})
+    }
+
+    #[test]
+    fn save_marks_saved_only_after_receipt_and_acknowledgement_and_keeps_later_edits() {
+        let (mut app, api) = app();
+        app.run("cell.set", json!({"cell": "A1", "input": "first"})).unwrap();
+        app.run("ui.agent.save", json!({})).unwrap();
+        let create = api.last().unwrap();
+        assert_eq!(create.method, Method::Put);
+        let workbook = create.path.trim_start_matches("/api/workbooks/").to_string();
+        api.reply(create.ticket, 200, &json!({"workbook_id": workbook, "title": "Book1.xlsx", "latest_version": 0}));
+        poll_at(&mut app, 0.0);
+        let upload = api.last().unwrap();
+        assert_eq!(upload.path, format!("/api/workbooks/{workbook}/snapshots"));
+        let metadata: Json = serde_json::from_str(&upload.upload.clone().unwrap().metadata).unwrap();
+        assert_eq!(metadata["expected_version"], 0);
+        app.run("cell.set", json!({"cell": "A2", "input": "later"})).unwrap();
+        assert!(app.session.doc().unwrap().is_dirty(), "nothing is saved before the receipt");
+        api.reply(upload.ticket, 200, &receipt(&upload, &workbook, 1));
+        poll_at(&mut app, 0.0);
+        let doc = app.session.doc().unwrap();
+        assert!(doc.is_dirty(), "the later edit stays unsaved");
+        assert_eq!(doc.saved.sheets[0].value(CellRef::parse("A1").unwrap()), Value::text("first"));
+        assert!(doc.saved.sheets[0].value(CellRef::parse("A2").unwrap()).is_empty());
+        let stored: Json = serde_json::from_str(api.log.borrow().storage.get("gridcraft.agent.workbook").unwrap()).unwrap();
+        assert_eq!(stored["version"], 1);
+        app.run("ui.agent.save", json!({})).unwrap();
+        let second = api.last().unwrap();
+        let metadata: Json = serde_json::from_str(&second.upload.unwrap().metadata).unwrap();
+        assert_eq!(metadata["expected_version"], 1, "the next save expects the committed version");
+    }
+
+    #[test]
+    fn save_retries_the_same_export_and_a_conflict_is_not_saved() {
+        let (mut app, api) = app();
+        app.run("cell.set", json!({"cell": "A1", "input": "x"})).unwrap();
+        app.run("ui.agent.save", json!({})).unwrap();
+        let create = api.last().unwrap();
+        api.reply(create.ticket, 200, &json!({}));
+        poll_at(&mut app, 0.0);
+        let first = api.last().unwrap();
+        api.reply(first.ticket, 0, &Json::Null);
+        poll_at(&mut app, 0.0);
+        poll_at(&mut app, 10.0);
+        let retry = api.last().unwrap();
+        assert_ne!(retry.ticket, first.ticket);
+        assert_eq!(retry.upload, first.upload, "identical export ID, metadata and bytes");
+        api.reply(retry.ticket, 409, &json!({"error": "version_conflict"}));
+        poll_at(&mut app, 10.0);
+        assert!(app.session.doc().unwrap().is_dirty());
+        assert!(app.agent.remote.save_error.as_ref().unwrap().contains("version conflict"));
+        assert!(app.agent.remote.save.is_none());
+    }
+
+    #[test]
+    fn reload_recovers_the_latest_committed_workbook_then_the_run() {
+        let api = ScriptedApi::default();
+        api.route(Method::Get, "/api/status", 200, json!({"durable_agent_loop": true, "openai_configured": true, "database_configured": true}));
+        let workbook = "11111111-1111-1111-1111-111111111111";
+        api.log
+            .borrow_mut()
+            .storage
+            .insert("gridcraft.agent.workbook".into(), json!({"workbook_id": workbook, "version": 1, "title": "Weekly Sales.xlsx"}).to_string());
+        api.log.borrow_mut().storage.insert("gridcraft.agent.run".into(), RUN.into());
+        let (mut app, inbox) = connected_with_inbox(&api);
+        let latest = api.last().unwrap();
+        assert_eq!(latest.path, format!("/api/workbooks/{workbook}/snapshots/latest"));
+        let bytes = gridcraft_engine::demo_files::weekly_sales_xlsx().unwrap();
+        api.reply_raw(latest.ticket, 200, bytes, &[("x-gridcraft-storage-version", "3")]);
+        poll_at(&mut app, 0.0);
+        assert!(app.agent.remote.pending_open.is_some());
+        assert!(app.run("ui.agent.submit", json!({"text": "Compare sales"})).is_err(), "agent waits for the correlated open");
+        open_from_inbox(&mut app, &inbox);
+        poll_at(&mut app, 0.0);
+        assert!(app.agent.remote.pending_open.is_none());
+        let cloud = app.agent.remote.cloud.clone().unwrap();
+        assert_eq!((cloud.workbook_id.as_str(), cloud.version), (workbook, 3));
+        assert_eq!(cloud.document_id, Some(app.session.doc().unwrap().uid));
+        let run = api.last().unwrap();
+        assert_eq!((run.method, run.path.as_str()), (Method::Get, format!("/api/runs/{RUN}").as_str()));
+        api.reply(run.ticket, 200, &json!({"run_id": RUN, "status": "interrupted", "pending_tool": null, "final_text": "Run stopped: provider_timeout", "action_count": 0, "sources": []}));
+        poll_at(&mut app, 0.0);
+        assert_eq!(app.agent.remote.retry.as_ref().unwrap().path, format!("/api/runs/{RUN}/resume"));
+    }
 }

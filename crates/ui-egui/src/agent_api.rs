@@ -3,6 +3,7 @@
 //! Responses arrive asynchronously and are drained once per frame.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use serde_json::Value as Json;
@@ -14,6 +15,15 @@ pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub enum Method {
     Get,
     Post,
+    Put,
+}
+
+/// A multipart upload: a `metadata` text field and a `file` field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Upload {
+    pub metadata: String,
+    pub file_name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// `path` is always a same-origin path beginning with `/api/`.
@@ -23,6 +33,7 @@ pub struct ApiRequest {
     pub method: Method,
     pub path: String,
     pub body: Option<Json>,
+    pub upload: Option<Upload>,
 }
 
 /// `status == 0` means no HTTP response arrived (network failure or an oversized body).
@@ -31,11 +42,17 @@ pub struct ApiResponse {
     pub ticket: u64,
     pub status: u16,
     pub body: Vec<u8>,
+    /// Only the service's `x-gridcraft-*` headers, lower-cased.
+    pub headers: Vec<(String, String)>,
 }
 
 impl ApiResponse {
     pub fn ok(&self) -> bool {
         (200..300).contains(&self.status)
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
     }
 }
 
@@ -47,6 +64,12 @@ pub trait AgentApi {
     fn new_id(&mut self) -> String;
     /// Identifies this editor session to the service.
     fn session_id(&self) -> String;
+    /// Small persistent values that survive a reload (browser storage). Default: none.
+    fn load(&self, _key: &str) -> Option<String> {
+        None
+    }
+    /// `None` removes the value.
+    fn store(&mut self, _key: &str, _value: Option<&str>) {}
 }
 
 /// Percent-encodes a query-string component (RFC 3986 unreserved characters pass through).
@@ -68,6 +91,7 @@ pub struct ScriptedLog {
     pub ready: Vec<ApiResponse>,
     /// `(method, path prefix, status, body)`; the first match answers immediately.
     pub routes: Vec<(Method, String, u16, Json)>,
+    pub storage: BTreeMap<String, String>,
     next_id: u64,
 }
 
@@ -85,7 +109,12 @@ impl ScriptedApi {
 
     pub fn reply(&self, ticket: u64, status: u16, body: &Json) {
         let body = if body.is_null() { Vec::new() } else { body.to_string().into_bytes() };
-        self.log.borrow_mut().ready.push(ApiResponse { ticket, status, body });
+        self.log.borrow_mut().ready.push(ApiResponse { ticket, status, body, headers: Vec::new() });
+    }
+
+    pub fn reply_raw(&self, ticket: u64, status: u16, body: Vec<u8>, headers: &[(&str, &str)]) {
+        let headers = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        self.log.borrow_mut().ready.push(ApiResponse { ticket, status, body, headers });
     }
 
     pub fn sent(&self) -> Vec<ApiRequest> {
@@ -102,7 +131,7 @@ impl AgentApi for ScriptedApi {
         let mut log = self.log.borrow_mut();
         let answer = log.routes.iter().find(|(method, prefix, ..)| *method == request.method && request.path.starts_with(prefix.as_str())).cloned();
         if let Some((_, _, status, body)) = answer {
-            log.ready.push(ApiResponse { ticket: request.ticket, status, body: body.to_string().into_bytes() });
+            log.ready.push(ApiResponse { ticket: request.ticket, status, body: body.to_string().into_bytes(), headers: Vec::new() });
         }
         log.sent.push(request);
     }
@@ -114,10 +143,22 @@ impl AgentApi for ScriptedApi {
     fn new_id(&mut self) -> String {
         let mut log = self.log.borrow_mut();
         log.next_id = log.next_id.saturating_add(1);
-        format!("scripted-{}", log.next_id)
+        format!("00000000-0000-4000-8000-{:012}", log.next_id)
     }
 
     fn session_id(&self) -> String {
         "scripted-session".into()
+    }
+
+    fn load(&self, key: &str) -> Option<String> {
+        self.log.borrow().storage.get(key).cloned()
+    }
+
+    fn store(&mut self, key: &str, value: Option<&str>) {
+        let mut log = self.log.borrow_mut();
+        match value {
+            Some(value) => log.storage.insert(key.to_string(), value.to_string()),
+            None => log.storage.remove(key),
+        };
     }
 }

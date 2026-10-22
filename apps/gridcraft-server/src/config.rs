@@ -104,6 +104,7 @@ impl Config {
                 api_key: key.to_owned(),
                 model: model.to_owned(),
                 base_url: value("OPENAI_BASE_URL").unwrap_or("https://api.openai.com/v1").to_owned(),
+                reasoning_effort: value("OPENAI_REASONING_EFFORT").map(str::to_owned),
             }),
             (None, None) => None,
             _ => return Err(ConfigError("set both OPENAI_API_KEY and OPENAI_MODEL, or leave both empty")),

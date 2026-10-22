@@ -106,8 +106,12 @@ async fn durable_runs_are_idempotent_source_bound_and_recoverable() -> TestResul
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     tokio::spawn(async move { axum::serve(listener, fake).await });
-    let client =
-        OpenAiClient::new(OpenAiConfig { api_key: "test-key".into(), base_url: format!("http://127.0.0.1:{port}/v1"), model: "scripted".into() })?;
+    let client = OpenAiClient::new(OpenAiConfig {
+        api_key: "test-key".into(),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "scripted".into(),
+        reasoning_effort: None,
+    })?;
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("index.html"), "test web asset")?;
     let app = router(AppState {

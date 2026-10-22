@@ -35,6 +35,7 @@ configuration names work locally and in Aiven Runtime.
 | `DATABASE_SSL_ROOT_CERT_PEM` | Alternative certificate contents, useful as a platform variable |
 | `OPENAI_API_KEY` | Backend-only provider credential |
 | `OPENAI_BASE_URL`, `OPENAI_MODEL` | Chat Completions endpoint prefix and configured model |
+| `OPENAI_REASONING_EFFORT` | Optional `reasoning_effort` request field; set `none` for models that reject function tools with reasoning on chat completions |
 | `ELEVENLABS_API_KEY` | Backend-only speech credential |
 | `ELEVENLABS_BASE_URL` | Speech API endpoint prefix |
 | `ELEVENLABS_STT_MODEL`, `ELEVENLABS_TTS_MODEL`, `ELEVENLABS_VOICE_ID` | Explicit speech configuration |

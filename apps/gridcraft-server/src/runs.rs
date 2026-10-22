@@ -471,8 +471,15 @@ fn review_summary(review: &SalesReview) -> Value {
 
 fn provider_code(error: &ProviderError) -> &'static str {
     match error {
-        ProviderError::InvalidConfiguration => "provider_configuration_invalid",
-        _ => "provider_unavailable",
+        ProviderError::InvalidConfiguration | ProviderError::VoiceNotConfigured => "provider_configuration_invalid",
+        ProviderError::InputLimit | ProviderError::InvalidConversation => "provider_request_invalid",
+        ProviderError::Rejected { status: 400 | 422 } => "provider_rejected_request",
+        ProviderError::Rejected { status: 401 | 403 } => "provider_rejected_credentials",
+        ProviderError::Rejected { status: 404 } => "provider_model_not_found",
+        ProviderError::Rejected { status: 429 } => "provider_rate_limited",
+        ProviderError::Rejected { .. } | ProviderError::Transport => "provider_unavailable",
+        ProviderError::Timeout => "provider_timeout",
+        ProviderError::ResponseLimit | ProviderError::InvalidResponse => "provider_invalid_response",
     }
 }
 

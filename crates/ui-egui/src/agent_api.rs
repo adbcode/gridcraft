@@ -26,6 +26,13 @@ pub struct Upload {
     pub bytes: Vec<u8>,
 }
 
+/// A raw request body with its media type (recorded audio).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RawBody {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
 /// `path` is always a same-origin path beginning with `/api/`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApiRequest {
@@ -34,6 +41,7 @@ pub struct ApiRequest {
     pub path: String,
     pub body: Option<Json>,
     pub upload: Option<Upload>,
+    pub raw: Option<RawBody>,
 }
 
 /// `status == 0` means no HTTP response arrived (network failure or an oversized body).
@@ -70,6 +78,18 @@ pub trait AgentApi {
     }
     /// `None` removes the value.
     fn store(&mut self, _key: &str, _value: Option<&str>) {}
+    /// Start microphone capture. The recording arrives later as an [`ApiResponse`] with this
+    /// ticket: status 200, the audio bytes and a `content-type` header, or status 0 on failure.
+    fn start_recording(&mut self, _ticket: u64) -> Result<(), String> {
+        Err("Voice input is not available in this build.".into())
+    }
+    fn stop_recording(&mut self) {}
+    /// Stop capture and drop the audio; no response is delivered.
+    fn cancel_recording(&mut self) {}
+    fn play(&mut self, _audio: Vec<u8>) -> Result<(), String> {
+        Err("Audio playback is not available in this build.".into())
+    }
+    fn stop_playback(&mut self) {}
 }
 
 /// Percent-encodes a query-string component (RFC 3986 unreserved characters pass through).
@@ -92,6 +112,10 @@ pub struct ScriptedLog {
     /// `(method, path prefix, status, body)`; the first match answers immediately.
     pub routes: Vec<(Method, String, u16, Json)>,
     pub storage: BTreeMap<String, String>,
+    pub recording: Option<u64>,
+    pub recording_stopped: bool,
+    pub recording_cancelled: bool,
+    pub played: Vec<Vec<u8>>,
     next_id: u64,
 }
 
@@ -160,5 +184,26 @@ impl AgentApi for ScriptedApi {
             Some(value) => log.storage.insert(key.to_string(), value.to_string()),
             None => log.storage.remove(key),
         };
+    }
+
+    fn start_recording(&mut self, ticket: u64) -> Result<(), String> {
+        let mut log = self.log.borrow_mut();
+        log.recording = Some(ticket);
+        log.recording_stopped = false;
+        log.recording_cancelled = false;
+        Ok(())
+    }
+
+    fn stop_recording(&mut self) {
+        self.log.borrow_mut().recording_stopped = true;
+    }
+
+    fn cancel_recording(&mut self) {
+        self.log.borrow_mut().recording_cancelled = true;
+    }
+
+    fn play(&mut self, audio: Vec<u8>) -> Result<(), String> {
+        self.log.borrow_mut().played.push(audio);
+        Ok(())
     }
 }

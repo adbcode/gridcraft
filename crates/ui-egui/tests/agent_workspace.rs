@@ -449,4 +449,78 @@ mod connected {
         poll_at(&mut app, 0.0);
         assert_eq!(app.agent.remote.retry.as_ref().unwrap().path, format!("/api/runs/{RUN}/resume"));
     }
+
+    fn voice_app() -> (SheetApp, ScriptedApi) {
+        let api = ScriptedApi::default();
+        api.route(
+            Method::Get,
+            "/api/status",
+            200,
+            json!({"durable_agent_loop": true, "openai_configured": true, "database_configured": true,
+                   "elevenlabs_stt_configured": true, "elevenlabs_tts_configured": true}),
+        );
+        api.route(Method::Get, "/api/rules", 200, json!([]));
+        let mut session = Session::new();
+        session.new_workbook();
+        let mut app = SheetApp::new(session, Services { agent_api: Some(Box::new(api.clone())), ..Services::default() });
+        poll_at(&mut app, 0.0);
+        poll_at(&mut app, 0.0);
+        (app, api)
+    }
+
+    #[test]
+    fn voice_inserts_an_editable_transcript_then_uses_the_typed_path_and_speaks_the_verified_outcome() {
+        let (mut app, api) = voice_app();
+        app.run("ui.agent.voiceStart", json!({})).unwrap();
+        let ticket = api.log.borrow().recording.unwrap();
+        app.run("ui.agent.voiceStop", json!({})).unwrap();
+        assert!(api.log.borrow().recording_stopped);
+        api.reply_raw(ticket, 200, vec![1, 2, 3], &[("content-type", "audio/webm;codecs=opus")]);
+        poll_at(&mut app, 0.0);
+        let transcribe = api.last().unwrap();
+        assert_eq!(transcribe.path, "/api/speech/transcribe");
+        assert_eq!(transcribe.raw.clone().unwrap().mime, "audio/webm;codecs=opus");
+        api.reply(transcribe.ticket, 200, &json!({"text": "Compare sales", "language_code": "en"}));
+        poll_at(&mut app, 0.0);
+        assert_eq!(app.agent.prompt, "Compare sales");
+        assert!(api.sent().iter().all(|r| r.path != "/api/runs/start"), "a transcript never auto-submits");
+        app.run("ui.agent.prompt", json!({"text": "Compare sales please"})).unwrap();
+        app.run("ui.agent.submit", json!({})).unwrap();
+        let start = api.last().unwrap();
+        assert_eq!(start.path, "/api/runs/start");
+        assert_eq!(start.body.clone().unwrap()["text"], "Compare sales please");
+        let done = json!({"run_id": RUN, "status": "completed", "pending_tool": null, "action_count": 0, "sources": [],
+                          "final_text": "Current net revenue is EUR 155.00. Details follow in the sources."});
+        api.reply(start.ticket, 200, &done);
+        poll_at(&mut app, 0.0);
+        let speech = api.sent().into_iter().find(|r| r.path == "/api/speech/synthesize").unwrap();
+        assert_eq!(speech.body.unwrap()["text"], "Current net revenue is EUR 155.00.");
+        api.reply_raw(speech.ticket, 200, vec![9, 9], &[]);
+        poll_at(&mut app, 0.0);
+        assert_eq!(api.log.borrow().played, vec![vec![9, 9]]);
+        app.run("ui.agent.speak", json!({})).unwrap();
+        assert_eq!(api.log.borrow().played.len(), 2);
+    }
+
+    #[test]
+    fn typed_requests_are_not_spoken_and_a_cancelled_recording_is_ignored() {
+        let (mut app, api) = voice_app();
+        app.run("ui.agent.prompt", json!({"text": "draft"})).unwrap();
+        app.run("ui.agent.voiceStart", json!({})).unwrap();
+        let ticket = api.log.borrow().recording.unwrap();
+        app.run("ui.agent.voiceCancel", json!({})).unwrap();
+        api.reply_raw(ticket, 200, vec![1], &[("content-type", "audio/webm")]);
+        poll_at(&mut app, 0.0);
+        assert_eq!(app.agent.prompt, "draft");
+        assert!(api.sent().iter().all(|r| r.path != "/api/speech/transcribe"));
+        app.run("ui.agent.submit", json!({"text": "Compare sales"})).unwrap();
+        let start = api.last().unwrap();
+        api.reply(
+            start.ticket,
+            200,
+            &json!({"run_id": RUN, "status": "completed", "pending_tool": null, "action_count": 0, "sources": [], "final_text": "Done."}),
+        );
+        poll_at(&mut app, 0.0);
+        assert!(api.sent().iter().all(|r| r.path != "/api/speech/synthesize"));
+    }
 }

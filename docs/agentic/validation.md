@@ -2,6 +2,20 @@
 
 > Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
 
+## Voice (checkpoint 4) — 2026-10-22
+
+- Composer microphone (connected mode with ElevenLabs STT): browser `getUserMedia` +
+  `MediaRecorder`, Stop transcribes, Cancel discards (a late recording is ignored), recordings stop
+  after 60 s. The transcript replaces the draft for editing and is never auto-submitted; Send uses
+  the same `/api/runs/start` path as typed text.
+- Only voice-originated runs are spoken, and only after the run completes: the first sentence
+  (at most 280 characters) is synthesized and played, with Play/Stop controls for replay.
+- Tests: `speech_fake_elevenlabs` (2: trimmed transcript, empty/unsupported audio rejected; bounded
+  synthesis, missing voice → 503) and 2 UI tests (voice → editable draft → typed path → spoken
+  outcome; typed requests never spoken; cancelled recording ignored).
+- Live ElevenLabs smoke against the local service: see `ckpt4-*` evidence (synthesize → MP3,
+  transcribe that MP3 back to text, oversized text → 422).
+
 ## Save receipts and reload recovery (checkpoint 3) — 2026-10-22
 
 - Agentic **Save** (`ui.agent.save`, connected mode): registers a workbook UUID on first save,
@@ -196,13 +210,14 @@ The web build still reports the pre-existing unused `Modified::At`/`Unknown` var
 - Aiven PostgreSQL TLS/connectivity and real-instance migrations; durable run receipts.
 - OpenAI tool lifecycle with actual provider failures and model availability.
 - Snapshot upload acknowledgement and restoration after browser reload using persisted bytes.
-- ElevenLabs STT/TTS, microphone permission, editable transcript and truthful spoken completion.
+- Microphone permission prompts across browsers (Safari `audio/mp4`) in a real browser session.
 - Release-mode artifact, broader platform testing and the repository's full CI gate.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | major | Checkpoint 4 bounded speech routes, browser recording and verified spoken outcomes |
 | 2026-10-22 | major | Checkpoint 3 save receipts, exact retry/conflict and reload recovery |
 | 2026-10-22 | major | Checkpoint 2 durable runs, fake-provider/DB/UI tests and live OpenAI smoke |
 | 2026-10-22 | major | Rust service/configuration/provider checks, unchanged workbook contracts and explicit database/container/live integration gates |

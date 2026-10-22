@@ -12,7 +12,7 @@ use serde_json::{Value as Json, json};
 
 use crate::SheetApp;
 use crate::agent::State;
-use crate::agent_api::{ApiRequest, ApiResponse, Method, Upload, query_component};
+use crate::agent_api::{ApiRequest, ApiResponse, Method, RawBody, Upload, query_component};
 
 /// Network failures are retried with the identical body, at most this many attempts in total.
 pub const MAX_ATTEMPTS: u32 = 3;
@@ -23,6 +23,9 @@ const MAX_QUERY_BYTES: usize = 200;
 const MAX_OUTCOME_BYTES: usize = 60_000;
 const SUPPORTED: &[&str] = &["xlsx", "xlsm", "xls", "xlsb", "ods", "csv", "tsv"];
 const OPEN_TIMEOUT_SECONDS: f64 = 30.0;
+/// Recordings stop automatically after this long.
+pub const MAX_RECORDING_SECONDS: f64 = 60.0;
+const MAX_SPOKEN_CHARS: usize = 280;
 pub const STORE_WORKBOOK: &str = "gridcraft.agent.workbook";
 pub const STORE_RUN: &str = "gridcraft.agent.run";
 const LIBRARY_OFFLINE: &str = "The cloud library needs the GridCraft service; this build is running the local demo.";
@@ -126,6 +129,9 @@ enum Purpose {
     CreateWorkbook,
     Upload,
     Rules,
+    Recording,
+    Transcribe,
+    Synthesize,
 }
 
 #[derive(Default)]
@@ -148,6 +154,16 @@ pub struct Remote {
     pub save: Option<PendingSave>,
     pub save_error: Option<String>,
     pub pending_open: Option<PendingOpen>,
+    pub speech_stt: bool,
+    pub speech_tts: bool,
+    pub recording: bool,
+    pub transcribing: bool,
+    /// Audio of the last verified spoken outcome, for replay.
+    pub spoken: Option<Vec<u8>>,
+    record_ticket: Option<u64>,
+    record_started: f64,
+    voice_draft: bool,
+    speak_next: bool,
     save_ticket: Option<u64>,
     save_retry_at: Option<f64>,
     tickets: BTreeMap<u64, Purpose>,
@@ -169,7 +185,7 @@ pub fn busy(state: &State) -> bool {
 }
 
 pub fn retry_pending(state: &State) -> bool {
-    state.remote.retry_at.is_some() || state.remote.save_retry_at.is_some() || state.remote.pending_open.is_some()
+    state.remote.retry_at.is_some() || state.remote.save_retry_at.is_some() || state.remote.pending_open.is_some() || state.remote.recording
 }
 
 pub fn saving(state: &State) -> bool {
@@ -209,12 +225,25 @@ fn send_upload(
     upload: Option<Upload>,
     purpose: Purpose,
 ) -> Result<u64, String> {
+    send_full(state, app, method, path, body, upload, None, purpose)
+}
+
+fn send_full(
+    state: &mut State,
+    app: &mut SheetApp,
+    method: Method,
+    path: String,
+    body: Option<Json>,
+    upload: Option<Upload>,
+    raw: Option<RawBody>,
+    purpose: Purpose,
+) -> Result<u64, String> {
     let api = app.services.agent_api.as_mut().ok_or("the agent service is not available in this build")?;
     let remote = &mut state.remote;
     remote.next_ticket = remote.next_ticket.checked_add(1).ok_or("request identifier limit reached")?;
     let ticket = remote.next_ticket;
     remote.tickets.insert(ticket, purpose);
-    api.send(ApiRequest { ticket, method, path, body, upload });
+    api.send(ApiRequest { ticket, method, path, body, upload, raw });
     Ok(ticket)
 }
 
@@ -249,6 +278,9 @@ pub fn poll(state: &mut State, app: &mut SheetApp, now: f64) {
         upload(state, app);
     }
     correlate_open(state, app, now);
+    if state.remote.recording && now - state.remote.record_started > MAX_RECORDING_SECONDS {
+        let _ = stop_voice(state, app);
+    }
 }
 
 /// Bind the downloaded workbook once the normal loader has opened it as a new document.
@@ -350,6 +382,8 @@ fn receive(state: &mut State, app: &mut SheetApp, purpose: Purpose, response: Ap
             } else {
                 Connection::LocalDemo
             };
+            state.remote.speech_stt = flag("elevenlabs_stt_configured");
+            state.remote.speech_tts = flag("elevenlabs_tts_configured");
             if state.remote.connection == Connection::Connected {
                 recover(state, app);
             }
@@ -432,6 +466,56 @@ fn receive(state: &mut State, app: &mut SheetApp, purpose: Purpose, response: Ap
             }
         }
         Purpose::Upload => receive_upload(state, app, response),
+        Purpose::Recording => {
+            state.remote.recording = false;
+            state.remote.record_ticket = None;
+            let mime = response.header("content-type").unwrap_or_default().to_string();
+            if response.status != 200 || response.body.is_empty() {
+                state.status = Some("No recording: the microphone is unavailable or permission was denied. You can type instead.".into());
+                return;
+            }
+            state.remote.transcribing = true;
+            state.status = Some("Transcribing...".into());
+            let raw = RawBody { mime, bytes: response.body };
+            if let Err(error) = send_full(state, app, Method::Post, "/api/speech/transcribe".into(), None, None, Some(raw), Purpose::Transcribe) {
+                state.remote.transcribing = false;
+                state.status = Some(error);
+            }
+        }
+        Purpose::Transcribe => {
+            state.remote.transcribing = false;
+            let text = serde_json::from_slice::<Json>(&response.body)
+                .ok()
+                .and_then(|value| value.get("text").and_then(Json::as_str).map(str::to_owned))
+                .filter(|_| response.ok());
+            match text {
+                Some(text) if !text.trim().is_empty() => {
+                    state.prompt = text.chars().take(gridcraft_engine::agent_protocol::MAX_PROMPT_BYTES / 4).collect();
+                    state.remote.voice_draft = true;
+                    state.status = Some("Transcript ready. Edit it if needed, then Send.".into());
+                }
+                Some(_) => state.status = Some("Nothing was heard. Try again or type your request.".into()),
+                None => {
+                    state.status = Some(format!(
+                        "Couldn't transcribe the recording (HTTP {}: {}). Your draft was kept.",
+                        response.status,
+                        error_code(&response.body)
+                    ))
+                }
+            }
+        }
+        Purpose::Synthesize => {
+            if response.ok() && !response.body.is_empty() {
+                state.remote.spoken = Some(response.body.clone());
+                if let Some(api) = app.services.agent_api.as_mut()
+                    && let Err(error) = api.play(response.body)
+                {
+                    state.status = Some(error);
+                }
+            } else {
+                state.status = Some(format!("The spoken summary is unavailable (HTTP {}); the written answer above is complete.", response.status));
+            }
+        }
         Purpose::Rules => {
             if let (true, Ok(rules)) = (response.ok(), serde_json::from_slice::<Vec<Json>>(&response.body)) {
                 state.remote.rules = rules
@@ -474,6 +558,12 @@ fn handle_view(state: &mut State, app: &mut SheetApp, view: RunView) {
             state.message(false, final_text.unwrap_or_else(|| "Done.".into()));
             state.status = Some(format!("Completed | {actions} completed action(s)"));
             let _ = send(state, app, Method::Get, "/api/rules".into(), None, Purpose::Rules);
+            if std::mem::take(&mut state.remote.speak_next) && state.remote.speech_tts {
+                let text = spoken_summary(state.messages.last().map_or("", |m| m.text.as_str()));
+                if !text.is_empty() {
+                    let _ = send(state, app, Method::Post, "/api/speech/synthesize".into(), Some(json!({"text": text})), Purpose::Synthesize);
+                }
+            }
         }
         "interrupted" | "failed" => {
             state.remote.approval = None;
@@ -610,6 +700,8 @@ pub fn submit(state: &mut State, app: &mut SheetApp, text: String) -> Result<Jso
     state.remote.retry = None;
     state.remote.actions.clear();
     state.remote.attachments.clear();
+    state.remote.speak_next = std::mem::take(&mut state.remote.voice_draft);
+    state.remote.spoken = None;
     state.prompt.clear();
     dispatch(state, app, RunRequest { method: Method::Post, path: "/api/runs/start".into(), body: Some(body), attempt: 0 });
     Ok(json!({"started": true, "request_id": request_id}))
@@ -911,4 +1003,68 @@ fn receive_upload(state: &mut State, app: &mut SheetApp, response: ApiResponse) 
             state.remote.save_error = Some(message);
         }
     }
+}
+
+/// The first sentence (or first 280 characters) of a completed, verified answer.
+pub fn spoken_summary(text: &str) -> String {
+    let text = text.trim();
+    let end = text.char_indices().find(|(i, ch)| matches!(ch, '.' | '!' | '?') && text[i + ch.len_utf8()..].starts_with(' ')).map(|(i, _)| i + 1);
+    let sentence = end.map_or(text, |end| &text[..end]);
+    sentence.chars().take(MAX_SPOKEN_CHARS).collect()
+}
+
+pub fn start_voice(state: &mut State, app: &mut SheetApp) -> Result<Json, String> {
+    if !connected(state) || !state.remote.speech_stt {
+        return Err("Voice input needs the GridCraft service with speech configured.".into());
+    }
+    if state.remote.recording || state.remote.transcribing {
+        return Err("A recording is already in progress.".into());
+    }
+    let remote = &mut state.remote;
+    remote.next_ticket = remote.next_ticket.checked_add(1).ok_or("request identifier limit reached")?;
+    let ticket = remote.next_ticket;
+    let api = app.services.agent_api.as_mut().ok_or("the agent service is not available in this build")?;
+    api.start_recording(ticket)?;
+    state.remote.tickets.insert(ticket, Purpose::Recording);
+    state.remote.record_ticket = Some(ticket);
+    state.remote.recording = true;
+    state.remote.record_started = state.remote.now;
+    state.status = Some("Listening... Stop to transcribe, or Cancel.".into());
+    Ok(json!({"recording": true}))
+}
+
+pub fn stop_voice(state: &mut State, app: &mut SheetApp) -> Result<Json, String> {
+    if !state.remote.recording {
+        return Err("Nothing is being recorded.".into());
+    }
+    if let Some(api) = app.services.agent_api.as_mut() {
+        api.stop_recording();
+    }
+    state.status = Some("Finishing the recording...".into());
+    Ok(json!({"stopping": true}))
+}
+
+pub fn cancel_voice(state: &mut State, app: &mut SheetApp) -> Result<Json, String> {
+    if let Some(ticket) = state.remote.record_ticket.take() {
+        state.remote.tickets.remove(&ticket);
+    }
+    if let Some(api) = app.services.agent_api.as_mut() {
+        api.cancel_recording();
+    }
+    state.remote.recording = false;
+    state.status = Some("Recording cancelled. Your draft was kept.".into());
+    Ok(json!({"cancelled": true}))
+}
+
+pub fn speak(state: &mut State, app: &mut SheetApp) -> Result<Json, String> {
+    let audio = state.remote.spoken.clone().ok_or("there is no spoken summary to play")?;
+    app.services.agent_api.as_mut().ok_or("playback is unavailable")?.play(audio)?;
+    Ok(json!({"playing": true}))
+}
+
+pub fn stop_speaking(app: &mut SheetApp) -> Result<Json, String> {
+    if let Some(api) = app.services.agent_api.as_mut() {
+        api.stop_playback();
+    }
+    Ok(json!({"stopped": true}))
 }

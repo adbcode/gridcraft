@@ -39,7 +39,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tts_configured = config.elevenlabs.as_ref().is_some_and(|provider| provider.voice_id.is_some());
     // Constructors validate credentials/URLs locally. They do not probe provider accounts.
     let openai = config.openai.take().map(OpenAiClient::new).transpose()?;
-    let _elevenlabs = config.elevenlabs.take().map(ElevenLabsClient::new).transpose()?;
+    let elevenlabs = config.elevenlabs.take().map(ElevenLabsClient::new).transpose()?;
     if command == "check-config" {
         println!(
             "Configuration valid. Database configured: {}; OpenAI configured: {openai_configured}; ElevenLabs configured: {speech_configured}. No network checks performed.",
@@ -68,7 +68,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let runs = store.clone().filter(|_| openai.is_some()).map(|store| RunService::new(store, openai.clone()));
-    let state = AppState { store, static_dir: config.static_dir, openai_configured, speech_configured, tts_configured, runs };
+    let state = AppState { store, static_dir: config.static_dir, openai_configured, speech_configured, tts_configured, runs, speech: elevenlabs };
     let listener = tokio::net::TcpListener::bind((config.bind, config.port)).await.map_err(|_| "cannot bind configured address/port")?;
     println!("GridCraft service listening on {}:{} (one shared mocked workspace; no login).", config.bind, config.port);
     axum::serve(listener, web::router(state)).with_graceful_shutdown(shutdown()).await.map_err(|_| "HTTP service stopped unexpectedly")?;

@@ -27,6 +27,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.agent.rules", "Show Agent Rules", "{open?: bool}; open or close remembered rules"),
     ("ui.agent.files", "Show Agent Files", "{open?: bool}; open or close the cloud file library"),
     ("ui.agent.save", "Save to Cloud Library", "{}; exact export, committed receipt, then acknowledgement; retries the same export"),
+    ("ui.agent.voiceStart", "Start Voice Input", "{}; records until Stop; the transcript is inserted as an editable draft"),
+    ("ui.agent.voiceStop", "Stop Voice Input", "{}; transcribe the recording"),
+    ("ui.agent.voiceCancel", "Cancel Voice Input", "{}; discard the recording"),
+    ("ui.agent.speak", "Play Spoken Summary", "{}; replay the last verified spoken outcome"),
+    ("ui.agent.speakStop", "Stop Spoken Summary", "{}"),
     ("ui.agent.retry", "Retry Agent Request", "{}; re-sends the identical failed request"),
     ("ui.agent.fileSearch", "Search Cloud Files", "{q: string}; connected mode only"),
     ("ui.agent.filePreview", "Preview Cloud File", "{workbook_id: string}; first rows of the latest version"),
@@ -201,6 +206,11 @@ fn execute(state: &mut State, app: &mut SheetApp, id: &str, params: &Json) -> Re
         }
         "ui.agent.retry" => agent_remote::retry(state, app),
         "ui.agent.save" => agent_remote::save(state, app),
+        "ui.agent.voiceStart" => agent_remote::start_voice(state, app),
+        "ui.agent.voiceStop" => agent_remote::stop_voice(state, app),
+        "ui.agent.voiceCancel" => agent_remote::cancel_voice(state, app),
+        "ui.agent.speak" => agent_remote::speak(state, app),
+        "ui.agent.speakStop" => agent_remote::stop_speaking(app),
         "ui.agent.fileSearch" => {
             let query = params.get("q").and_then(Json::as_str).ok_or("q is required")?;
             agent_remote::search_files(state, app, query)
@@ -617,7 +627,25 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 if icon_button(ui, true, if expanded { "Collapse" } else { "Expand" }, |p, r, c| icons::paint(p, r, icon, c)).clicked() {
                     invoke(app, "ui.agent.expand", json!({}));
                 }
-                let _ = icon_button(ui, false, "Voice input: next checkpoint", paint_mic);
+                let voice = agent_remote::connected(&app.agent) && app.agent.remote.speech_stt;
+                if app.agent.remote.recording {
+                    if ui.button("Stop").on_hover_text("Stop and transcribe").clicked() {
+                        invoke(app, "ui.agent.voiceStop", json!({}));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        invoke(app, "ui.agent.voiceCancel", json!({}));
+                    }
+                } else {
+                    let ready = voice && !app.agent.remote.transcribing;
+                    let hover = if voice {
+                        "Speak your request; the transcript is editable before sending"
+                    } else {
+                        "Voice input needs the GridCraft service with speech configured"
+                    };
+                    if icon_button(ui, ready, hover, paint_mic).clicked() && ready {
+                        invoke(app, "ui.agent.voiceStart", json!({}));
+                    }
+                }
                 if ui.add_enabled(!agent_remote::busy(&app.agent), egui::Button::new("Send")).clicked() {
                     invoke(app, "ui.agent.submit", json!({}));
                 }
@@ -798,6 +826,17 @@ fn connected_details(app: &mut SheetApp, ui: &mut egui::Ui) {
                     invoke(app, "ui.agent.discard", json!({}));
                 }
             });
+        });
+    }
+    if app.agent.remote.spoken.is_some() {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Spoken summary").small().color(t.text_dim));
+            if ui.small_button("Play").clicked() {
+                invoke(app, "ui.agent.speak", json!({}));
+            }
+            if ui.small_button("Stop").clicked() {
+                invoke(app, "ui.agent.speakStop", json!({}));
+            }
         });
     }
     if app.agent.remote.retry.is_some() && ui.button("Retry").clicked() {

@@ -121,6 +121,7 @@ async fn durable_runs_are_idempotent_source_bound_and_recoverable() -> TestResul
         speech_configured: false,
         tts_configured: false,
         runs: Some(RunService::new(store, Some(client))),
+        speech: None,
     });
 
     let (status, run) = request(&app, Method::POST, "/api/runs/start", Some(start("r1", "Compare sales"))).await?;

@@ -32,6 +32,8 @@ durable agent loop. An API save does not itself mark the browser document saved.
 | `POST /api/runs/{run_uuid}/continue` | `RunContinue` for the one outstanding tool call; identical retry replays without a second receipt, a different outcome or tool call ID returns 409 |
 | `GET /api/runs/{run_uuid}` | `RunView`; a `running` run idle for more than 90 s is reported `interrupted` |
 | `POST /api/runs/{run_uuid}/resume` | Continues an interrupted run from its persisted conversation |
+| `POST /api/speech/transcribe` | Raw audio body (`audio/webm`, `audio/ogg`, `audio/wav`, `audio/mpeg`, `audio/mp4`; at most 10 MiB) → `{ "text", "language_code" }`, editable text only; never starts a run |
+| `POST /api/speech/synthesize` | `{ "text": "..." }`, at most 600 bytes of a verified summary → `audio/mpeg` |
 | `GET /api/workbooks/{workbook_uuid}/snapshots/latest` | Saved bytes; `x-gridcraft-storage-version` and `x-gridcraft-sha256` headers identify the returned snapshot |
 
 JSON requests are capped at 1 MiB. Snapshot bytes are capped at 16 MiB, metadata at 16 KiB,

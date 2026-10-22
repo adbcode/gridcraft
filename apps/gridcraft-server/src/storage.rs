@@ -2,7 +2,7 @@
 //! browser identities and database versions remain separate. No database error, URL or
 //! query text is returned to clients or included in this module's error messages.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt, time::Duration};
 
 use gridcraft_engine::agent_bridge::Identity;
 use gridcraft_engine::agent_protocol::AttachmentRef;
@@ -11,7 +11,7 @@ use gridcraft_engine::review_workflow::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow};
+use sqlx::{Connection, PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction, migrate::MigrateError, postgres::PgRow};
 use uuid::Uuid;
 
 pub const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
@@ -47,8 +47,98 @@ impl From<sqlx::Error> for StorageError {
     }
 }
 
-pub async fn migrate(pool: &PgPool) -> Result<()> {
-    sqlx::migrate!("./migrations").run(pool).await.map_err(|_| StorageError::Migration)
+/// Startup-only diagnostics: never retain driver messages, SQL, identifiers or credentials.
+#[derive(Debug, thiserror::Error)]
+pub struct MigrationError {
+    phase: &'static str,
+    reason: &'static str,
+    version: Option<i64>,
+    sqlstate: Option<String>,
+}
+
+impl fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "database migration failed during {}: {}", self.phase, self.reason)?;
+        if let Some(version) = self.version {
+            write!(f, " (migration {version})")?;
+        }
+        if let Some(code) = &self.sqlstate {
+            write!(f, " (SQLSTATE {code})")?;
+        }
+        Ok(())
+    }
+}
+
+impl MigrationError {
+    fn new(phase: &'static str, reason: &'static str) -> Self {
+        Self { phase, reason, version: None, sqlstate: None }
+    }
+
+    fn database(phase: &'static str, error: sqlx::Error) -> Self {
+        let reason = match &error {
+            sqlx::Error::Tls(_) => "TLS verification failed; check the PostgreSQL hostname and project CA PEM (keep verify-full)",
+            sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                "TLS/protocol negotiation failed; check the PostgreSQL hostname and project CA PEM (keep verify-full)"
+            }
+            sqlx::Error::Io(_) => "network connection failed; check the PostgreSQL host, port, service status and network access",
+            sqlx::Error::Configuration(_) => "invalid database connection configuration; check DATABASE_URL and CA settings",
+            sqlx::Error::PoolTimedOut => "connection timed out; check PostgreSQL connectivity and service limits",
+            sqlx::Error::Database(_) => "PostgreSQL rejected the operation",
+            _ => "database driver failed; check connection settings and migration compatibility",
+        };
+        let mut diagnostic = Self::new(phase, reason);
+        if let Some(code) = error.as_database_error().and_then(|error| error.code()) {
+            diagnostic.set_sqlstate(&code);
+        }
+        diagnostic
+    }
+
+    fn set_sqlstate(&mut self, code: &str) {
+        if code.len() != 5 || !code.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()) {
+            return;
+        }
+        self.sqlstate = Some(code.to_owned());
+        self.reason = match code {
+            "28P01" | "28000" => "authentication rejected; check the PostgreSQL user/password and access policy in DATABASE_URL",
+            "3D000" => "database does not exist; check the database name in DATABASE_URL",
+            "42501" => "insufficient privileges; the migration user needs schema/table creation and migration-lock access",
+            "42P07" | "42710" => "schema object already exists; inspect existing schema and migration history before making changes",
+            "3F000" => "target schema does not exist; check the connection search_path",
+            "53300" => "PostgreSQL connection limit reached; check service capacity and connection usage",
+            "57P03" => "PostgreSQL is not accepting connections; check service status",
+            _ => self.reason,
+        };
+    }
+
+    fn migration(error: MigrateError) -> Self {
+        let (reason, version) = match error {
+            MigrateError::Execute(error) => return Self::database("migration setup/locking", error),
+            MigrateError::ExecuteMigration(error, version) => {
+                let mut diagnostic = Self::database("migration SQL", error);
+                diagnostic.version = Some(version);
+                return diagnostic;
+            }
+            MigrateError::VersionMismatch(version) => {
+                ("applied migration checksum differs from this build; restore the original migration, do not delete history", Some(version))
+            }
+            MigrateError::VersionMissing(version) => {
+                ("database contains a migration missing from this build; deploy the matching migration history", Some(version))
+            }
+            MigrateError::Dirty(version) => ("a migration is marked incomplete; inspect and repair it before restarting", Some(version)),
+            _ => ("migration history or source is incompatible with this build", None),
+        };
+        Self { version, ..Self::new("migration validation", reason) }
+    }
+}
+
+pub async fn migrate(pool: &PgPool) -> std::result::Result<(), MigrationError> {
+    // A direct connection preserves failures that pool retries can mask as timeouts.
+    // Use the same TLS policy, and close on return to release even a failed migration's lock.
+    let mut connection = tokio::time::timeout(Duration::from_secs(10), PgConnection::connect_with(&pool.connect_options()))
+        .await
+        .map_err(|_| MigrationError::new("connection", "connection timed out; check PostgreSQL connectivity and service limits"))?
+        .map_err(|error| MigrationError::database("connection", error))?;
+    sqlx::migrate!("./migrations").run(&mut connection).await.map_err(MigrationError::migration)
 }
 
 #[derive(Clone)]
@@ -811,6 +901,49 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_diagnostics_discard_driver_secrets() {
+        for error in [
+            sqlx::Error::Tls("private certificate and password".into()),
+            sqlx::Error::Configuration("postgres://private-user:private-password@private-host/private-db".into()),
+            sqlx::Error::Protocol("private server response".into()),
+            sqlx::Error::Io(std::io::Error::other("private network details")),
+            sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "private certificate details")),
+        ] {
+            let diagnostic = MigrationError::database("connection", error);
+            assert!(diagnostic.to_string().contains("database migration failed during connection"));
+            assert!(!format!("{diagnostic} {diagnostic:?}").contains("private"));
+        }
+        let diagnostic = MigrationError::migration(MigrateError::Source("private migration SQL".into()));
+        assert!(!format!("{diagnostic} {diagnostic:?}").contains("private"));
+        let diagnostic = MigrationError::database("connection", sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::InvalidData)));
+        assert!(diagnostic.to_string().contains("TLS/protocol negotiation failed"));
+    }
+
+    #[test]
+    fn migration_diagnostics_identify_history_and_sqlstate_without_raw_messages() {
+        let diagnostic = MigrationError::migration(MigrateError::VersionMismatch(3));
+        assert!(diagnostic.to_string().contains("checksum"));
+        assert!(diagnostic.to_string().contains("migration 3"));
+        let diagnostic = MigrationError::migration(MigrateError::VersionMissing(2));
+        assert!(diagnostic.to_string().contains("missing from this build"));
+        assert!(diagnostic.to_string().contains("migration 2"));
+        let diagnostic = MigrationError::migration(MigrateError::Dirty(1));
+        assert!(diagnostic.to_string().contains("incomplete"));
+        for (code, hint) in [("28P01", "authentication"), ("42501", "privileges"), ("42P07", "already exists"), ("3D000", "database does not exist")]
+        {
+            let mut diagnostic = MigrationError::new("connection", "PostgreSQL rejected the operation");
+            diagnostic.set_sqlstate(code);
+            assert!(diagnostic.to_string().contains(hint));
+            assert!(diagnostic.to_string().contains(code));
+        }
+        for code in ["private", "42\n07", "42p07", "secret\nlog injection"] {
+            let mut diagnostic = MigrationError::new("connection", "PostgreSQL rejected the operation");
+            diagnostic.set_sqlstate(code);
+            assert!(diagnostic.sqlstate.is_none());
+        }
+    }
 
     fn sample_upload() -> SnapshotUpload {
         SnapshotUpload {

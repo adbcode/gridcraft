@@ -8,3 +8,9 @@ plan/
 /.claude/
 /target-*/
 /craft-fonts/
+
+# Local service credentials and certificates. Only the empty template is tracked.
+.env
+.env.*
+!.env.example
+/secrets/

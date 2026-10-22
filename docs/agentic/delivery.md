@@ -1,133 +1,171 @@
 # Product integration and delivery
 
-> Last reviewed: 2026-10-21 · Last updated: 2026-10-21 · Change: major
+> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
 
-## Extend the existing Rust application
+The product must turn changing business data and explicitly remembered rules into a correct,
+editable workbook. Its first complete slice is: retrieve the saved test-order exclusion,
+compare two defined periods, inspect the live sheet, apply and verify a summary, explain its
+sources, and allow native undo. A convincing demonstration also changes a source record,
+produces a changed answer, and shows why the earlier answer was correct for its earlier data.
 
-The base interface belongs in this repository and uses Rust/egui. Classic and Agentic modes
-keep the same `SheetApp`, workbook and native undo history; the mode toggle only changes
-layout. The panel routes bounded actions through the live-session adapter and existing engine
-commands. The business and resume contracts stay in `crates/engine`; UI rendering stays in
-`crates/ui-egui`. No separate product repository or TypeScript implementation is required.
+The initial customer hypothesis is a small retail or ecommerce operator preparing a weekly
+category-sales review in a spreadsheet. The value to test is a correct, editable review that
+retains their explicit working rules and explains changes using source records. For the
+required pitch, recruit a few operators or their accountants to try that single journey;
+record completion time and correction count against their current process before claiming
+time savings. The landing page and pitch slide are separate deliverables, not this baseline.
 
-The current panel is an offline demonstration with a bounded set of typed intents and
-buttons. It uses the documented synthetic sales fixture, not live business records. Its
-conversation and explicit supported rules are held only in the current session. It must
-identify these limits and reject unsupported requests rather than simulate model reasoning,
-provider success or durable memory. The eventual Anthropic loop replaces this intent routing
-while reusing inspection, validation, query semantics, provenance and action receipts.
+## Current scope and decisions
 
-Prefer Rust provider/database adapters in this workspace when service access exists. A web
-deployment requires a trusted server for secrets and durable operations; add a Rust service
-crate or a separate deployment component as needed. A different stack remains an option only
-if a concrete integration requires it. Native and browser UIs should share the same typed
-workflow contract. The HTTP routes below are a proposed service boundary, not implemented
-endpoints or a requirement to move the interface out of this application.
+Keep the existing Rust/egui application and live engine session. Classic and Agentic are
+layouts of the same `SheetApp`; toggling must retain workbook content, pending previews and
+native history. The local panel's deterministic intent routing remains visibly a demo until
+its service workflow is connected. Panel rules currently last only for that editor session.
 
-Serve the browser application and API from one origin. If an external embedding host is
-later added, preserve its iframe identity. Keep provider credentials and database connections
-inaccessible to browser bundles. Aiven PostgreSQL will store acknowledged snapshots, enabled
-rules and durable run records; the live editor remains authoritative for unsaved content.
-Development memory must never silently substitute for configured production storage.
+The trusted Rust server in `apps/gridcraft-server` serves web assets and HTTP APIs from one
+origin. Aiven Runtime is the hosting target, and the already-created Aiven PostgreSQL service
+stores data and files. The baseline uses a fixed server-selected mock workspace without login.
+Lovable is a separate landing page outside this repository's scope. OpenAI Chat Completions
+is the first required model API; Responses and Anthropic adapters remain optional.
+ElevenLabs handles transcription and synthesis through ordinary HTTP calls.
 
-## HTTP contracts to implement
+Maintain the editor, bridge, deterministic query semantics and recovery protections. Add the
+service boundary and connect it incrementally. Retire the old Anthropic-first assumption,
+the separate TypeScript-shell prerequisite and the duplicate draft SQL schema. The executable
+[server migrations](../../apps/gridcraft-server/migrations/) now define implemented storage.
+Do not add speculative run tables or claim browser integration merely because adapters exist.
 
-Runtime-validate all boundaries. Limit request size, number of rounds, number of tools, query
-rows, speech duration, tool-result bytes and total run time. Authorize every workbook/run/rule
-by authenticated owner; never accept an arbitrary client-supplied owner ID. The SQL schema is
-a starting storage contract, not an authentication implementation.
+## Implemented baseline and remaining boundaries
 
-| Endpoint | Input/behavior | Durable result |
+| Area | Implemented | Remaining |
 |---|---|---|
-| `GET /api/health/live` | Process alive | No provider query |
-| `GET /api/health/ready` | Required configured services usable; bounded `SELECT 1` | No claim of inference or speech readiness without a real probe |
-| `POST /api/runs/start` | Client idempotency key, workbook/session ID, user text, inspected identity | Run ID, server conversation, next outstanding tool request or final outcome |
-| `POST /api/runs/:id/continue` | Session ID, exact outstanding tool-use ID, verified bridge result | Consumes once; identical retry returns same next response |
-| `GET /api/runs/:id` | Read run and completed action history after interruption | Final-message outcome separate from mutation outcome |
-| `GET /api/rules` | Enabled rules for owner, bounded list | Original wording and supported structured rule |
-| `POST /api/rules` | Explicit remember intent and supported structure | Rule ID; unsupported intent returns a visible error |
-| `POST /api/workbooks/:id/snapshots` | Snapshot ID, browser identity, expected DB version, XLSX bytes, content hash | Commit-acknowledged database version; exact retry returns prior receipt |
-| `GET /api/workbooks/:id/snapshots/latest` | Owner/workbook | Bytes plus version; open must acknowledge before tools resume |
-| `POST /api/speech/transcribe` | Bounded microphone upload | Editable transcript; never execute until the user submits it |
-| `POST /api/speech/synthesize` | Short verified completion text | Audio; TTS failure does not undo completed edits |
+| Editor | Local Agentic panel, live inspection/write/verify/native undo, persistent mode toggle | HTTP client and durable workflow integration |
+| Service | Rust HTTP server, static hosting, liveness/readiness/status, bounded same-origin API | Aiven deployment validation and product connection |
+| Data | PostgreSQL migration; explicit synthetic seed; bounded typed sales import and comparison; saved supported rules | Real business-source mapping and end-to-end data-driven demonstration |
+| Evidence | Stored query timestamp/revision, exact rows, ingestion origins, rules, result and provenance | Display and drill-down from the connected conversation |
+| Files | Versioned XLSX bytes, exact-retry snapshot receipts, expected-version conflicts | Browser upload/acknowledgement/reload coordination |
+| Models | OpenAI Chat Completions adapter, configurable endpoint/model, correlated normalized tool messages | Durable multi-step loop, persisted conversation and browser tool dispatch |
+| Voice | ElevenLabs STT/TTS HTTP adapters | Speech routes, push-to-talk, editable transcript and playback |
+| Operations | Private dotenv configuration, Make tasks, one-origin Dockerfile | Successful container/deployed checks recorded separately |
 
-Persist a request/result receipt **before** acknowledging its continuation. Use transactions
-and uniqueness constraints for the owner + idempotency key, run + tool-use ID, and workbook +
-browser session + snapshot ID. Two concurrent continuations must not both advance the model. A process crash
-between storing a tool result and requesting the provider is resumable from that stored
-result. A provider call may still be repeated after network uncertainty; no repeated provider
-response may bypass browser mutation receipts. Do not promise globally exactly-once external
-API calls.
+See [the service API](service-api.md) for implemented endpoints and [operations](operations.md)
+for running them. Configuration and adapter construction do not call providers. Readiness
+checks database/schema and web assets; it does not claim model or speech connectivity.
+[Validation](validation.md) records actual tests, including their local/mocked/live boundaries.
 
-Retain the complete Anthropic assistant content blocks and match each tool result to its
-`tool_use_id`. Initially dispatch one browser mutation at a time. Reject unknown, duplicate,
-out-of-order, wrong-run and wrong-session results; do not let a model choose arbitrary engine
-commands or SQL. The pure Rust run-state reference exercises correlation and retry behavior,
-but does not implement an HTTP server or durable transactions.
+## Prove that data and memory drive the result
 
-## Tool contracts
+Use the documented [synthetic fixture](sales-fixture.md) for deterministic acceptance first.
+Keep periods, EUR cents, paid-order status and refund attribution fixed while changing one
+factor at a time:
 
-| Tool | Execution | Bounded responsibility |
+1. Seed the twelve original synthetic records explicitly. Without a saved exclusion rule,
+   current-period revenue is **65500 cents**, versus **15000 cents** previously.
+2. Explicitly save “Remember to exclude test orders.” The current total becomes **15500 cents**
+   with three qualifying current records. Restart the service or create a fresh connection;
+   retrieving and applying the saved rule must produce the same result.
+3. In a controlled source correction, change `c-jackets.refunded_minor` from `1000` to `2000`.
+   A new query with the saved rule must produce **14500 cents** current revenue and **5000 cents**
+   for Jackets. Its source revision changes; an identical import retry does not change it again.
+4. Retrieve the earlier query by its ID. Its **15500-cent** answer, original refund amount,
+   source rows and rule context must remain unchanged. Explain the difference using that
+   evidence, rather than reconstructing an old answer from today's mutable records.
+5. Through the connected editor workflow, write the new comparison with live formulas and
+   provenance, verify affected cells, and undo the last native operation. Editing the summary
+   manually must remain possible throughout the same mounted workbook session.
+
+Steps 1–4 exercise storage behavior; step 5 and model-led multi-step execution are still
+integration work. Do not present API tests as a completed product demonstration. Record
+expected and observed totals, included row counts, preserved rule/evidence IDs and whether
+manual correction was required. This supplies a measurable comparison against the unfiltered
+answer, not a claim of general accuracy from one fixture.
+
+The import endpoint accepts typed records, not arbitrary SQL. `synthetic_demo` and `imported`
+are ingestion labels; an imported synthetic row is still synthetic. Demonstrating real business
+data requires a documented source/export and field mapping. Preserve that distinction in the
+interface and the demonstration. Aggregates show the size of changes; contributing records
+support descriptive drill-down, not a causal claim about customer demand.
+
+## Durable typed agent loop to implement next
+
+The Rust backend owns conversation state, outstanding tools, authorization and retry/recovery.
+OpenAI interprets the request and selects bounded tools; it never receives unrestricted SQL or
+engine execution. The existing `RunState` is an in-memory reference, not durable orchestration.
+
+The planned routes below are **not implemented**:
+
+| Endpoint | Responsibility |
+|---|---|
+| `POST /api/runs/start` | Accept client request ID, workbook/session identity and user text; save a run and its initial context |
+| `POST /api/runs/:id/continue` | Consume the exact outstanding tool-call result once; replay an identical continuation |
+| `GET /api/runs/:id` | Recover status, completed actions and outstanding work after interruption |
+| `POST /api/speech/transcribe` | Return a bounded editable transcript; execution waits for explicit submission |
+| `POST /api/speech/synthesize` | Speak a short verified result; synthesis failure cannot erase completed edits |
+
+Store the request and result receipt before acknowledging a continuation. Add transactional
+uniqueness for workspace/request ID and run/tool-call ID, with one outstanding browser mutation
+at a time. Reject wrong-run, wrong-session, stale, unknown and out-of-order results. Concurrent
+continuations must not both advance the run. Preserve the complete provider assistant message
+and associate each tool result with its emitted tool-call ID; normalized adapter types retain
+these details. Provider-specific wire formats belong in adapters, not workbook code.
+
+Bound model rounds, tool count, query rows, payload sizes and total run time. A provider timeout
+after successful edits is an incomplete conversation with recorded effects, not an unchanged
+workbook. Resume from stored evidence and exact browser mutation receipts. A provider request
+may repeat after network uncertainty; do not promise globally exactly-once external API calls.
+
+| Tool | Execution | Responsibility |
 |---|---|---|
-| `query_sales_comparison` | Backend | Fixed typed periods/metric/currency/status/rules; return aggregates and provenance |
-| `query_sales_detail` | Backend | Descriptive contributing records for a category; not unsupported causal conclusions |
-| `read_review_rules` | Backend | Enabled supported structured rules and original wording |
-| `save_review_rule` | Backend | Explicit supported remember intent, no opaque ineffective rule text |
-| `inspect_workbook` | Live editor | Context and bounded range read |
-| `write_summary` | Live editor | Exact rectangle, expected identity; one native operation, verified readback |
-| `undo_last_operation` | Live editor | One native undo, current identity, exact readback range |
+| `query_sales_comparison` | Backend | Validated periods/metric/currency/status and saved rules; return aggregates and immutable evidence ID |
+| `query_sales_detail` | Backend | Bounded contributing records from the relevant query evidence |
+| `read_review_rules` | Backend | Retrieve enabled supported rules and original wording |
+| `save_review_rule` | Backend | Persist an explicitly requested supported rule |
+| `inspect_workbook` | Live editor | Read context and bounded ranges |
+| `write_summary` | Live editor | Apply one validated rectangle under the inspected identity and verify readback |
+| `undo_last_operation` | Live editor | Undo one native operation and inspect the affected range |
 
-When connected, Anthropic interprets intent and selects tools. The trusted backend owns
-conversation/run state and carries out that agent loop; ElevenLabs only provides transcription
-and synthesized speech. The current offline panel uses deterministic routing in place of
-Anthropic. Eventually typed and submitted voice transcripts enter the same `/start` workflow.
-Never describe an aggregate decline as a cause; show the
-comparison and offer bounded detail. Persist applied rule IDs and record counts with the run.
+A prepared write must fail on a conflicting manual edit, wrong document or sheet. Preserve
+unfinished cell drafts and report busy instead of replacing them. Do not refresh the expected
+identity behind the user's back. Native undo may undo a more recent manual operation; it is
+not conversation-wide rollback.
 
-## External services
+## Snapshot completion
 
-The following documentation was checked on 2026-10-21; no provider or deployment calls were made.
+The server can store files, but the browser still owns the open workbook. Complete this path:
 
-- Aiven Runtime deploys GitHub-sourced applications; new commits require an explicit redeploy.
-  Connect the actual project/repository and verify the supported manifest before deployment.
-  [Deployment documentation](https://aiven.io/docs/products/runtime/deploy-apps).
-- Anthropic client tool results must match the emitted tool-use IDs. Preserve all content
-  blocks and report tool failures as errors, separate from already completed actions.
-  [Tool lifecycle](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls).
-- ElevenLabs supports HTTP transcription and speech generation. Application WebSockets are
-  unnecessary for push-to-talk. [Transcription](https://elevenlabs.io/docs/api-reference/speech-to-text/convert),
-  [speech generation](https://elevenlabs.io/docs/api-reference/text-to-speech/convert).
+```text
+Export identified live snapshot
+→ upload bytes with session/export ID and expected database version
+→ commit and receive the exact snapshot receipt
+→ acknowledge that snapshot in the editor
+```
 
-Future server configuration should have explicit `DATABASE_URL`, trusted PostgreSQL CA/TLS
-settings, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ELEVENLABS_API_KEY`,
-`ELEVENLABS_STT_MODEL`, `ELEVENLABS_TTS_MODEL`, `ELEVENLABS_VOICE_ID`, `PORT`, and
-`PUBLIC_ORIGIN`. Choose available models/voices when credentials exist; there are no
-hard-coded guesses or fabricated healthy adapters here. Do not commit secrets or read them
-to prove this offline foundation.
+Do not mark the document saved on export or before commit. Later browser edits must remain
+dirty after acknowledgement. Exact retries return the original receipt even after a later
+save; conflicting bytes, identity or preconditions under the same export ID must fail.
+Database snapshot versions, source-data revisions and live workbook change tokens are separate.
+On reload, wait for correlated workbook-open success before allowing new agent tools.
 
 ## Delivery gates
 
-| Stage | Work | Exit criterion |
-|---|---|---|
-| Foundation/interface | Rust/egui panel in this project, mode toggle, typed offline intents, live bridge and fixture | Same session/history survives toggle; manual/programmatic edits, formulas, export and undo verified; offline limits visible |
-| Browser validation | Build the existing web app; test the panel and optional parent bridge | Browser interaction and screenshots verified; correlated open before bridge tools; reviewed commit/artifact pinned |
-| Storage/deployment | Local PostgreSQL first, migrations, one-origin container, then Aiven | Transaction/retry/ownership tests; public URL and real PostgreSQL query |
-| Typed agent | Anthropic adapter, durable runs, fixed sales tools | Correct first slice using actual Aiven records and enabled rule; visible verified results |
-| Recovery | Snapshot upload/ack/reload, interrupted continuations, concurrent edits | Duplicate calls do not repeat edits; incomplete runs preserve successful action receipts |
-| Voice | Push-to-talk, editable transcript, brief TTS | Same tested workflow from speech; provider failure does not fabricate success |
-| Optional polish | Charts, reduced ribbon, extra query shapes | Core gates stay green; no new remount or history loss |
+| Stage | Exit criterion |
+|---|---|
+| Service/data baseline | Local storage, retry, version and scope checks recorded; fixture comparisons and immutable evidence correct |
+| One-origin deployment | Reviewed image runs on Aiven; public editor, schema readiness and existing PostgreSQL reads/writes verified |
+| Typed agent and recovery | Saved rule survives restart; model performs query → inspect → apply → verify; changed source changes the next answer; interruption retains receipts |
+| Saved workbook recovery | Upload acknowledgement leaves later edits dirty; reload restores committed bytes and correct session gating |
+| Voice | Editable transcript enters the same durable workflow; verified completion spoken truthfully |
+| Optional polish | Charts, reduced ribbon and extra query shapes preserve the core guarantees |
 
-Basic recovery is part of every stage. Before provider integration, add persistence behind
-the existing session-only rule/run interfaces and validate it against local PostgreSQL.
-The foundation builds on the recorded base; that base commit does not pin the completed
-interface or bridge. Record the reviewed final commit and artifact digest
-before deployment. Charts, CLI regeneration,
-realtime audio and arbitrary business data ingestion are deferred. If a bridge attempt fails,
-time-box diagnosis before choosing a CLI-only product; don't build both engines concurrently.
-No hour estimate is treated as reliable before live deployment and provider validation.
+Basic recovery belongs in every stage. Record the reviewed service commit and image digest
+before deployment. Keep API keys in runtime configuration and out of build inputs. Use
+[operations](operations.md) for Aiven's explicit redeploy behavior. Actual provider availability,
+container deployment and hosted microphone behavior require their own validation; no fixed
+hour estimate or local green test proves those gates.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-21 | major | Existing-app Rust/egui interface, optional trusted service boundary, provider/storage contracts and ordered live acceptance gates |
+| 2026-10-22 | major | OpenAI-first Rust service, real persistence/evidence baseline and measurable changing-data acceptance before durable agent and voice integration |
+| 2026-10-21 | major | Existing-app Rust/egui interface, optional service boundary and ordered live acceptance gates |

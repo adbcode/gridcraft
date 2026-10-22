@@ -18,8 +18,9 @@ deployment, provider calls, publication or changes to unrelated services.
 - Optional embedding transport: `apps/gridcraft-web/src/host.rs` and
   [bridge protocol](../../../docs/agentic/bridge-protocol.md).
 - New persistence/provider work: read [delivery.md](../../../docs/agentic/delivery.md) and
-  [schema.sql](../../../docs/agentic/schema.sql). Verify what is implemented now; the original
-  foundation supplied contracts, not a server, database, model or speech client.
+  [service-api.md](../../../docs/agentic/service-api.md) and
+  [the migrations](../../../apps/gridcraft-server/migrations). The Rust server now supplies
+  storage APIs and provider adapters; the durable agent loop and connected UI remain unfinished.
 
 Keep one mounted `SheetApp`/`Session` across modes. Keep one `BridgeState` per caller's
 editor lifetime so tokens and retry receipts survive requests. If an embedding host is

@@ -1,0 +1,27 @@
+# Credentials and machine state never enter the image build context.
+**/.env
+**/.env.*
+**/.secrets
+**/secrets
+**/.aws
+**/.ssh
+**/.cargo/credentials
+**/.cargo/credentials.toml
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/.DS_Store
+.git
+.github
+.agents
+.codex
+.claude
+plan
+corpus
+craft-fonts
+target
+target-*
+dist
+log
+**/*.log

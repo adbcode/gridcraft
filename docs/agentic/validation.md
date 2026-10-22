@@ -1,8 +1,66 @@
-# Foundation validation
+# Foundation and service validation
 
-> Last reviewed: 2026-10-21 · Last updated: 2026-10-21 · Change: major
+> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: major
 
-## Evidence and boundaries
+## Service baseline — 2026-10-22
+
+Work started from the clean `feat/agentic-foundation` commit
+`8b89f0e663ca31cd62a98b948fc4f7f0ccee8710` on the new
+`feat/aiven-service-baseline` branch. This section records the new service checks;
+the earlier foundation/browser evidence below remains dated evidence for unchanged code.
+
+- Server unit and local HTTP mock tests: **20 passed**. Includes Chat Completions tool
+  correlation and assistant-message replay; truncated/unknown tool rejection; speech
+  multipart/audio contracts; bounded bodies; no automatic retry on timeout; redirect and
+  error redaction; configuration/TLS policy; static-file protection; API origin checks;
+  and honest unconfigured readiness/status. Mock HTTP listeners required local network
+  permission in this execution environment. No real provider requests were made.
+- Configuration subprocess tests: **2 passed**. Real process environment overrides a
+  private dotenv file, including an empty value disabling file configuration; invalid
+  configuration exits without printing credential values.
+- `cargo clippy --locked --offline -p gridcraft-server --all-targets -- -D warnings`:
+  **passed**, including integration-test compilation.
+- Existing live bridge and review contract tests: **14 + 8 passed**. The service reuses
+  these contracts; the existing editor and bridge implementation were not changed.
+- Native CLI `check-config`: **passed** with no configured services and no network calls.
+- Actual HTTP process smoke check: liveness/status and the existing compiled editor index
+  returned 200, readiness correctly returned 503 without PostgreSQL, WASM had the correct
+  MIME type, and `.env` returned 404. The process stopped cleanly on SIGTERM. This used the
+  earlier local browser artifact, not a newly built release container.
+- WASM checking: **passed** using the already-documented local `build-std` workaround.
+  The unchanged `backstage.rs` unused-variant warning remains. This checks that server-only
+  dependencies do not enter the web application build.
+- Layering: **17 crates, no violations**. Assets: **34 attributed files**, no assets added.
+- The private `.env` was created with mode `600` and verified ignored by Git. Make's env
+  bootstrap preserves existing values, refuses symlinks and does not source the file.
+  The container context excludes dotenv, secrets, credential files and private certificates.
+
+The five real PostgreSQL tests were **compiled but not run**. They are opt-in through
+`make test-db` and never fall back to the normal `DATABASE_URL`. Four cover transactions,
+workspace scope, retry recovery, durable rules and changed-source evidence; one exercises
+the HTTP handlers with actual generated XLSX bytes and an exact snapshot acknowledgement.
+Local PostgreSQL provisioning could not complete: container-image transfers were very slow,
+and alternative temporary native/package downloads ended in read timeouts. No migration was
+applied to a local or Aiven database. Database correctness is therefore an outstanding gate,
+not established by the passing unit tests. Run `make test-db` against an explicitly selected
+disposable PostgreSQL database before deploying this storage baseline.
+
+The complete `cargo xtask ci` gate was rerun: formatting passed, but strict workspace clippy
+still stopped at the existing macOS `clippy::let_unit_value` in
+`crates/ui-egui/src/desktop_theme.rs:36`. Later stages were skipped by that command. The
+separate server, engine, assets, layering and WASM checks above passed; full CI is not green.
+
+Container construction was attempted with Podman. It reached Rust base-image downloads,
+with slow measurable transfer, and was stopped before application compilation. The Dockerfile
+and build inputs were reviewed; no successful image build or Aiven deployment is claimed.
+Temporary network workarounds did not alter global toolchain, proxy or VM configuration.
+All task-owned test servers and container/download jobs were stopped; no preview was left running.
+
+No Aiven service credentials, deployment, customer data or live OpenAI/ElevenLabs calls were
+used. The UI is still the offline demonstration; durable runs, connected browser saving,
+voice capture and authentication remain separate delivery work.
+
+## Original foundation evidence — 2026-10-21
 
 The base checkout was clean at `8ae67c5534f3d7f145423a57206cf5fd08fe9221`.
 That base pin does not contain this foundation. Record the reviewed foundation commit and
@@ -97,9 +155,9 @@ The web build still reports the pre-existing unused `Modified::At`/`Unknown` var
 
 ## Remaining live gates
 
-- Real service adapters and deployment configuration, authentication/authorization.
-- PostgreSQL migration/query/transaction tests, restart-safe run and snapshot receipts.
-- Anthropic tool lifecycle with actual provider failures and model availability.
+- Successful container build and Aiven deployment; any future multi-user authentication.
+- Aiven PostgreSQL TLS/connectivity and real-instance migrations; durable run receipts.
+- OpenAI tool lifecycle with actual provider failures and model availability.
 - Snapshot upload acknowledgement and restoration after browser reload using persisted bytes.
 - ElevenLabs STT/TTS, microphone permission, editable transcript and truthful spoken completion.
 - Release-mode artifact, broader platform testing and the repository's full CI gate.
@@ -108,4 +166,5 @@ The web build still reports the pre-existing unused `Modified::At`/`Unknown` var
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | major | Rust service/configuration/provider checks, unchanged workbook contracts and explicit database/container/live integration gates |
 | 2026-10-21 | major | Offline engine/UI checks, actual browser bridge evidence and explicit live-service limits |

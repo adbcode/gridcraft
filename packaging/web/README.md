@@ -29,8 +29,7 @@ hash, so they can be cached forever. Only `index.html` needs revalidation.
   the server send `Content-Encoding: br`.
 - **Caching:** `Cache-Control: public, max-age=31536000, immutable` on the hashed `.wasm` and
   `.js` files, and `no-cache` on `index.html`.
-- **HTTPS:** WebGPU (and the clipboard) only work in a secure context, which means `https://`
-  or `http://localhost`. Over plain HTTP elsewhere, the app falls back to WebGL2.
+- **HTTPS:** `crypto.randomUUID()` requires a secure context: `https://` or `http://localhost`.
 - **No special isolation headers:** GridCraft doesn't use `SharedArrayBuffer`, so it doesn't
   need `Cross-Origin-Opener-Policy` or `Cross-Origin-Embedder-Policy`. If your site already sends
   COEP `require-corp`, also send `Cross-Origin-Resource-Policy: same-origin` (or `cross-origin`
@@ -73,12 +72,9 @@ Local test: `python3 -m http.server 8765` inside the folder, then open http://lo
   downloads) are blocked.
 - Don't send `X-Frame-Options: DENY` or a `frame-ancestors` CSP that excludes the embedding page.
 
-## Renderer selection
+## Browser command bridge
 
-GridCraft's web build is the same egui app as the desktop one, compiled to wasm
-(`apps/gridcraft-web`). It renders with the backend `apps/gridcraft-web` selects (WebGPU
-where available, otherwise WebGL2). If the web app adds URL flags to force a backend (as the
-sibling Craft apps do with `?webgl` / `?cpu`), document them here; they also work on the
-iframe `src`.
-
-A browser with neither WebGPU nor WebGL2 gets a message in place of the app.
+The static Rust/WebAssembly app provides a formatted-value preview and command console. An
+embedding page may use the same-origin version-3 message protocol described in
+[`../../docs/agentic-core.md`](../../docs/agentic-core.md). The browser does not include an LLM,
+server-side engine, or renderer-selection flags.

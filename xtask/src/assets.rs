@@ -81,6 +81,6 @@ mod tests {
         assert!(is_asset("examples/sales.csv"));
         assert!(is_asset("crates/engine/examples/budget.xlsx"));
         assert!(!is_asset("crates/xlsx/tests/data.csv"));
-        assert!(is_asset("crates/ui-egui/icon.PNG"));
+        assert!(is_asset("assets/icon.PNG"));
     }
 }

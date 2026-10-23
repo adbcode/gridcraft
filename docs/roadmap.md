@@ -1,5 +1,8 @@
 # Roadmap detail
 
+> Historical desktop-parity planning retained from the pre-extraction branch. The active scope is
+> in [`../ROADMAP.md`](../ROADMAP.md) and [`agentic-core.md`](agentic-core.md).
+
 > **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-11 · **Change:** minor (PivotTable calculated fields) · **Target:** Microsoft Excel (Microsoft 365)
 
 Forward-looking plan. The one-page summary is [`ROADMAP.md`](../ROADMAP.md); the ranked work
@@ -101,7 +104,7 @@ to check our files, and Windows machines with the reported GPU drivers.
 - `cargo xtask parity` regenerates [`parity-checklist.md`](parity-checklist.md) (ribbon
   catalog vs registered commands); `cargo xtask ci` checks it is current.
 - `cargo test --workspace`: engine, formula, function, XLSX and UI behaviour.
-- `cargo run --release -p gridcraft-ui-egui --example snapshot -- --sample sales out.png`: look at
+- `cd apps/gridcraft-web && trunk build --release`: build the browser shell for review.
   the UI offscreen.
 - Function coverage: the script method in [function-parity.md](function-parity.md). A
   `cargo xtask functions` that diffs the registry against a checked-in Excel name list would make

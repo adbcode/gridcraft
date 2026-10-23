@@ -1,10 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::io::{BufRead, BufReader, Write};
-
 use serde_json::{Value, json};
 
-use crate::{Backend, Headless, PROTOCOL_VERSION, Remote, Server, control_addr, tool_definitions};
+use crate::{Headless, PROTOCOL_VERSION, Server, tool_definitions};
 
 fn server() -> Server {
     Server::new(Box::new(Headless::new()))
@@ -104,11 +102,11 @@ fn tools_list_has_schemas() {
         "new_workbook",
         "undo",
         "redo",
-        "screenshot",
         "list_functions",
     ] {
         assert!(names.contains(&want), "missing tool {want}");
     }
+    assert!(!names.contains(&"screenshot"));
     for t in tools {
         assert_eq!(t["inputSchema"]["type"], "object", "{t}");
         assert!(t["description"].as_str().unwrap().len() > 20, "{t}");
@@ -158,7 +156,6 @@ fn malformed_input_never_panics() {
     fails(&mut s, "sort_range", json!({"keys": []}));
     fails(&mut s, "open_workbook", json!({"path": "/definitely/not/here.xlsx"}));
     fails(&mut s, "save_workbook", json!({}));
-    assert!(fails(&mut s, "screenshot", json!({"path": "/tmp/x.png"})).contains("no UI in headless mode"));
 }
 
 #[test]
@@ -352,49 +349,6 @@ fn cell_set_without_input_is_error() {
     // An explicit empty string still clears.
     ok(&mut s, "execute_command", json!({"command": "cell.set", "params": {"cell": "B2", "input": ""}}));
     assert_eq!(ok(&mut s, "get_cell", json!({"cell": "B2"}))["text"], "");
-}
-
-#[test]
-fn remote_backend_over_tcp() {
-    // A fake app: answers engine.execute by running a headless session; closes after the first
-    // request to exercise the reconnect path.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handle = std::thread::spawn(move || {
-        let mut h = Headless::new();
-        for (i, stream) in listener.incoming().take(2).enumerate() {
-            let stream = stream.unwrap();
-            let mut w = stream.try_clone().unwrap();
-            let mut r = BufReader::new(stream);
-            loop {
-                let mut line = String::new();
-                if r.read_line(&mut line).unwrap_or(0) == 0 {
-                    break;
-                }
-                let req: Value = serde_json::from_str(&line).unwrap();
-                let reply = match h.call(req["method"].as_str().unwrap(), req["params"].clone()) {
-                    Ok(v) => json!({"id": req["id"], "ok": true, "result": v}),
-                    Err(e) => json!({"id": req["id"], "ok": false, "error": e}),
-                };
-                w.write_all(format!("{reply}\n").as_bytes()).unwrap();
-                if i == 0 {
-                    break; // drop the first connection
-                }
-            }
-        }
-    });
-    let addr = control_addr(&port.to_string());
-    assert_eq!(addr, format!("127.0.0.1:{port}"));
-    let mut s = Server::new(Box::new(Remote::connect(&addr).unwrap()));
-    assert_eq!(ok(&mut s, "evaluate_formula", json!({"formula": "=1+1"}))["result"], json!(2.0));
-    // Second call reconnects transparently.
-    ok(&mut s, "set_cell", json!({"cell": "A1", "input": "7"}));
-    assert_eq!(ok(&mut s, "get_cell", json!({"cell": "A1"}))["value"], json!(7.0));
-    let msg = fails(&mut s, "execute_command", json!({"command": "nope"}));
-    assert!(msg.contains("unknown command"), "{msg}");
-    drop(s);
-    handle.join().unwrap();
-    assert!(Remote::connect("127.0.0.1:1").is_err());
 }
 
 #[test]

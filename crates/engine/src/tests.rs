@@ -2152,18 +2152,18 @@ fn checkboxes_survive_xlsx_as_cell_controls() {
 }
 
 #[test]
-fn file_options_reports_settings_and_asks_for_the_options_page() {
+fn file_options_reports_settings_without_opening_a_dialog() {
     let mut s = Session::new();
     // No workbook: nothing to report, but still no error.
     assert_eq!(s.execute("file.options", json!({})).unwrap(), json!({"calculation": null}));
-    s.take_ui_requests();
+    assert!(s.take_ui_requests().is_empty());
     s.new_workbook();
     s.execute("formulas.calculationOptions", json!({"mode": "manual", "iterative": true})).unwrap();
     let before = s.active().unwrap().wb.clone();
     let r = s.execute("file.options", json!({})).unwrap();
     assert_eq!(r["calculation"]["mode"], "manual");
     assert_eq!(r["calculation"]["iterative"], true);
-    assert!(matches!(s.take_ui_requests().as_slice(), [crate::UiRequest::Dialog(name, _)] if name == "options"));
+    assert!(s.take_ui_requests().is_empty());
     assert_eq!(s.active().unwrap().wb, before, "Options never changes the workbook");
 }
 
@@ -3272,6 +3272,18 @@ fn link_open_refuses_every_scheme_but_http_https_and_mailto() {
     assert_eq!(s.take_ui_requests(), vec![crate::UiRequest::OpenUrl("HTTPS://example.org/a".into())]);
     s.execute("link.open", json!({"url": "B2"})).unwrap();
     assert!(s.take_ui_requests().is_empty());
+}
+
+#[test]
+fn headless_calls_report_unresolved_ui_requests() {
+    let mut s = s();
+    let error = s.execute_headless("home.formatCells", json!({})).unwrap_err().to_string();
+    assert!(error.contains("formatCells") && error.contains("explicit parameters"), "{error}");
+    let error = s.execute_headless("file.open", json!({})).unwrap_err().to_string();
+    assert!(error.contains("path") && error.contains("never open dialogs"), "{error}");
+    let error = s.execute_headless("edit.beginEdit", json!({})).unwrap_err().to_string();
+    assert!(error.contains("interactive-only"), "{error}");
+    assert!(s.ui_requests.is_empty());
 }
 
 #[test]

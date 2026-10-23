@@ -1,25 +1,26 @@
-# GridCraft MCP server
+# Model Context Protocol
 
-`gridcraft-cli mcp` exposes GridCraft to AI agents over the [Model Context Protocol](https://modelcontextprotocol.io):
-newline-delimited JSON-RPC 2.0 on stdin/stdout (protocol `2025-06-18`; `2025-03-26` and `2024-11-05` clients are
-answered in their own version). Logs go to stderr.
+`gridcraft-cli mcp` exposes an in-process, headless GridCraft engine to MCP clients over stdio:
+newline-delimited JSON-RPC 2.0. Protocol versions `2025-06-18`, `2025-03-26`, and `2024-11-05` are
+supported. Logs are written to stderr.
 
-Two backends:
+Start with a blank workbook, an existing file, or a sample:
 
-| Mode | Command | What it drives |
-|---|---|---|
-| Headless (default) | `gridcraft-cli mcp [--in book.xlsx \| --sample budget]` | An in-process engine session — no window. |
-| Remote | `gridcraft-cli mcp --connect 7979` | A running app started with `gridcraft --control 7979` (TCP JSON lines on `127.0.0.1`). |
+```sh
+gridcraft-cli mcp
+gridcraft-cli mcp --in workbook.xlsx
+gridcraft-cli mcp --sample sales
+```
 
-## Claude Code
+## Client configuration
+
+Claude Code can register the stdio server directly:
 
 ```sh
 claude mcp add gridcraft -- gridcraft-cli mcp
-# or drive the desktop app you are looking at:
-claude mcp add gridcraft-app -- gridcraft-cli mcp --connect 7979
 ```
 
-JSON config (`.mcp.json`, Claude Desktop, other clients):
+For `.mcp.json`, Claude Desktop, and other clients that accept MCP server JSON configuration:
 
 ```json
 {
@@ -32,40 +33,44 @@ JSON config (`.mcp.json`, Claude Desktop, other clients):
 }
 ```
 
-Use `"args": ["mcp", "--connect", "7979"]` for the desktop app, or `["mcp", "--in", "/path/book.xlsx"]` to start
-with a file open.
+To start with an existing workbook, set `"args": ["mcp", "--in", "/path/to/book.xlsx"]`.
+The CLI also supports local workbook operations without MCP; see [`cli.md`](cli.md).
 
 ## Tools
 
-| Tool | Arguments | Does |
+| Tool | Arguments | Purpose |
 |---|---|---|
-| `execute_command` | `command`, `params?` | Runs **any** engine command (`cell.set`, `home.bold`, `data.removeDuplicates`, …). |
-| `list_commands` | `search?` | Command ids, labels, ribbon paths, shortcuts and parameter docs. |
-| `inspect_workbook` | — | Sheets, used ranges, tables, charts, names, selection, history. |
-| `read_range` | `range?`, `sheet?`, `formulas?`, `formatted?` | Rows of values (default: the used range). |
-| `write_range` | `range`, `values` (2-D) | `range.setValues`; strings starting with `=` are formulas. |
-| `set_cell` / `get_cell` | `cell`, `input` / `cell` | Enter one cell / read value, formula, display text, style. |
-| `evaluate_formula` | `formula`, `cell?` | Evaluates without changing the sheet. |
-| `select` | `range`, `active?` | Sets the selection. |
-| `format_range` | `range`, `bold?`, `italic?`, `underline?`, `fontName?`, `fontSize?`, `fontColor?`, `fillColor?`, `numberFormat?`, `horizontalAlign?`, `wrapText?`, `borders?` | Composes the `home.*` formatting commands. |
-| `insert_chart` | `range`, `type`, `title?`, `subtype?`, `at?` | `insert.chart`. |
-| `create_table` | `range`, `style?`, `header?`, `name?` | `insert.table`. |
-| `sort_range` | `keys`, `range?`, `header?` | `data.sort`; keys are `"B"`, `"B desc"` or `{column, order}`. |
-| `filter` | `column`, `range?`, `values?`, `custom?`, `top?`, `blanks?`, `clear?` | `data.filterBy` (turns AutoFilter on when needed). |
-| `open_workbook` / `save_workbook` / `new_workbook` | `path` / `path?` / `sample?` | Files (`.xlsx`, `.csv`, `.tsv`, `.json`, `.html`). |
-| `undo` / `redo` | `steps?` | History. |
-| `screenshot` | `path` | PNG of the window (Remote only). |
-| `list_functions` | `search?`, `category?` | Worksheet functions with signatures. |
+| `execute_command` | `command`, `params?` | Run a supported headless engine command. |
+| `list_commands` | `search?` | Discover supported command ids, labels, ribbon paths, shortcuts, and parameter docs. |
+| `inspect_workbook` | — | Inspect sheets, used ranges, tables, charts, names, selection, and history. |
+| `read_range` | `range?`, `sheet?`, `formulas?`, `formatted?` | Read rows of values (defaults to the used range). |
+| `write_range` | `range`, `values` (2-D) | Write values or formulas; strings beginning with `=` are formulas. |
+| `set_cell` / `get_cell` | `cell`, `input` / `cell` | Enter one cell or read its value, formula, display text, and style. |
+| `evaluate_formula` | `formula`, `cell?` | Evaluate a formula without changing the sheet. |
+| `select` | `range`, `active?` | Set the selection. |
+| `format_range` | `range`, formatting options | Apply supported font, color, alignment, number-format, wrapping, and border options. |
+| `insert_chart` | `range`, `type`, `title?`, `subtype?`, `at?` | Insert a chart. |
+| `create_table` | `range`, `style?`, `header?`, `name?` | Create a table. |
+| `sort_range` | `keys`, `range?`, `header?` | Sort a range; keys may be `"B"`, `"B desc"`, or `{ "column": "B", "order": "desc" }`. |
+| `filter` | `column`, `range?`, `values?`, `custom?`, `top?`, `blanks?`, `clear?` | Apply or clear a filter. |
+| `open_workbook` / `save_workbook` / `new_workbook` | `path` / `path?` / `sample?` | Open, save, or create local workbooks. |
+| `undo` / `redo` | `steps?` | Undo or redo workbook changes. |
+| `list_functions` | `search?`, `category?` | Discover worksheet functions and signatures. |
 
-Results are one text block holding pretty JSON; failures set `isError: true` with a readable message. Unknown tools,
-missing required arguments and wrong argument types are JSON-RPC `-32602` errors; malformed JSON is `-32700`; unknown
-methods `-32601`.
+`execute_command` uses the headless capability policy, not every UI action in the engine catalog.
+Pure editor/dialog entry points and external-URL actions are excluded or rejected; parameterized
+engine operations remain available when they have a meaningful headless implementation. Use
+`list_commands` to discover what the current session supports.
+
+Tool results are text blocks containing JSON. Failures set `isError: true`; unknown tools,
+missing required arguments, and wrong argument types are JSON-RPC `-32602` errors, malformed JSON
+is `-32700`, and unknown methods are `-32601`.
 
 ## Resources
 
-- `gridcraft://workbook` — `document.inspect` of the active workbook.
-- `gridcraft://commands` — every command with its parameter docs.
-- `gridcraft://functions` — every worksheet function.
+- `gridcraft://workbook` — inspection of the active workbook.
+- `gridcraft://commands` — the supported command catalog and parameter docs.
+- `gridcraft://functions` — worksheet functions.
 
 `prompts/list` returns an empty list.
 
@@ -81,7 +86,9 @@ methods `-32601`.
 
 ## Embedding
 
-`gridcraft-mcp` is a library: `Server::new(Box::new(Headless::new()))` or
-`Server::new(Box::new(Remote::connect(&control_addr("7979"))?))`, then `Server::serve(stdin, stdout)` or
-`Server::handle_line(line) -> Option<String>`. Implement the `Backend` trait (`call(method, params)`) to drive another
-host.
+`gridcraft-mcp` is a library. Create a `Server` with `Headless`, then call
+`Server::serve(stdin, stdout)` or `Server::handle_line(line) -> Option<String>`. A host can also
+implement the `Backend` trait (`call(method, params)`) to connect another headless engine session.
+This is stdio JSON-RPC, separate from the browser's protocol-3 same-origin bridge; MCP file tools
+use filesystem paths and do not transfer `ArrayBuffer` payloads. See
+[`agentic-core.md`](agentic-core.md) for the capability map and browser protocol.

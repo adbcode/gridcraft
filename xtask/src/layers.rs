@@ -36,10 +36,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("xlsx", Class::Layer(2)),
     ("chart", Class::Layer(3)),
     ("engine", Class::Layer(5)),
-    ("ui-egui", Class::Layer(6)),
     ("mcp", Class::Layer(6)),
-    // L7 apps (exempt) and tooling (unchecked)
-    ("gridcraft", Class::Layer(7)),
+    // L7 apps and tooling (unchecked)
     ("cli", Class::Layer(7)),
     ("web", Class::Layer(7)),
     ("xtask", Class::Exempt),
@@ -61,7 +59,7 @@ fn intra_layer_allowed(from: &str, to: &str) -> bool {
 /// file format never pulls in calculation or engine code.
 pub const FORMAT_ALLOWED: &[(&str, &[&str])] = &[("xlsx", &["core", "formula", "model"])];
 
-/// External crates that constitute a UI toolkit / windowing dependency.
+/// External crates that constitute a native UI toolkit / windowing dependency.
 /// Entries ending in `*` are prefixes.
 pub const UI_CRATES: &[&str] = &["egui*", "eframe", "winit", "rfd", "wgpu*"];
 
@@ -233,8 +231,8 @@ mod tests {
             c("gridcraft-xlsx", &[("gridcraft-core", Normal, true), ("gridcraft-formula", Normal, true), ("gridcraft-model", Normal, true)]),
             c("gridcraft-chart", &[("gridcraft-model", Normal, true)]),
             c("gridcraft-engine", &[("gridcraft-calc", Normal, true), ("gridcraft-xlsx", Normal, true), ("gridcraft-chart", Normal, true)]),
-            c("gridcraft-ui-egui", &[("gridcraft-engine", Normal, true), ("egui", Normal, false), ("wgpu", Normal, false)]),
-            c("gridcraft-cli", &[("gridcraft-ui-egui", Normal, true), ("gridcraft-mcp", Normal, true)]),
+            c("gridcraft-mcp", &[("gridcraft-engine", Normal, true)]),
+            c("gridcraft-cli", &[("gridcraft-engine", Normal, true), ("gridcraft-mcp", Normal, true)]),
         ];
         assert!(check(&g).is_empty(), "{:?}", check(&g));
     }
@@ -249,8 +247,8 @@ mod tests {
     fn sideways_dependency_flagged() {
         let v = check(&[c("gridcraft-xlsx", &[("gridcraft-calc", Normal, true)])]);
         assert!(v.iter().any(|x| matches!(x, Violation::Upward { from: 2, to: 2, .. })), "{v:?}");
-        let v = check(&[c("gridcraft-ui-egui", &[("gridcraft-mcp", Normal, true)])]);
-        assert!(matches!(v[..], [Violation::Upward { from: 6, to: 6, .. }]));
+        let v = check(&[c("gridcraft-mcp", &[("gridcraft-cli", Normal, true)])]);
+        assert!(matches!(v[..], [Violation::Upward { from: 6, to: 7, .. }]));
     }
 
     #[test]
@@ -301,8 +299,8 @@ mod tests {
 
     #[test]
     fn apps_and_xtask_exempt() {
-        for app in ["gridcraft", "gridcraft-cli", "gridcraft-web", "xtask"] {
-            assert!(check(&[c(app, &[("egui", Normal, false), ("gridcraft-ui-egui", Normal, true)])]).is_empty());
+        for app in ["gridcraft-cli", "gridcraft-web", "xtask"] {
+            assert!(check(&[c(app, &[("egui", Normal, false), ("gridcraft-mcp", Normal, true)])]).is_empty());
         }
     }
 

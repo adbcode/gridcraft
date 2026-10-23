@@ -21,7 +21,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Options",
             ["File"],
             None,
-            "{} → {calculation: {mode, iterative, maxIterations, maxChange}} for the active workbook (the interface opens File › Options; change settings with their own commands, e.g. formulas.calculationOptions, view.theme, app.language.set)",
+            "{} → {calculation: {mode, iterative, maxIterations, maxChange}} for the active workbook (change settings with their own commands, e.g. formulas.calculationOptions)",
             always,
             options
         ),
@@ -188,10 +188,8 @@ fn properties(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
-/// File › Options: reports the workbook-level settings and asks the interface to show its Options
-/// page. Nothing changes here; every setting has its own command.
+/// Reports the workbook-level settings without opening an interface dialog.
 fn options(s: &mut Session, _: &Json) -> Result<Json> {
-    s.ui_requests.push(crate::UiRequest::Dialog("options".into(), json!({})));
     let calculation = s.active().map(|d| {
         let c = &d.wb.calc;
         let mode = match c.mode {

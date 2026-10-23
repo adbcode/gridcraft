@@ -1,13 +1,12 @@
 //! An in-process engine session that answers the engine-level control-channel methods itself.
 
-use gridcraft_engine::Session;
+use gridcraft_engine::{Session, agent_commands};
 use serde_json::{Value, json};
 
 use crate::backend::Backend;
 
-/// Error for methods that need a window.
-pub(crate) const NO_UI: &str = "no UI in headless mode: start the app with `gridcraft --control 7979` and run the MCP server \
-with `gridcraft-cli mcp --connect 7979`";
+/// Error for methods that require an interactive user interface.
+pub(crate) const NO_UI: &str = "interactive UI methods are unavailable in this headless-only build";
 
 /// Headless backend: a [`Session`] with one blank workbook to start with.
 pub struct Headless {
@@ -34,15 +33,13 @@ impl Headless {
     }
 
     fn execute(&mut self, id: &str, params: Value) -> Result<Value, String> {
-        // Programmatic calls never open dialogs; anything a command queued for a UI is dropped.
+        // Programmatic calls never open dialogs or silently discard unresolved UI requests.
         self.session.execute_headless(id, params).map_err(|e| e.to_string())
     }
 
     fn commands(&self, params: &Value) -> Value {
         let q = params.get("search").and_then(Value::as_str).map(str::to_ascii_lowercase);
-        let list: Vec<Value> = self
-            .session
-            .commands()
+        let list: Vec<Value> = agent_commands(&self.session)
             .into_iter()
             .filter(|c| {
                 q.as_ref().is_none_or(|q| {
@@ -78,10 +75,6 @@ impl Backend for Headless {
             m if gridcraft_engine::find_command(m).is_some() => self.execute(m, params),
             other => Err(format!("unknown method `{other}`")),
         }
-    }
-
-    fn has_ui(&self) -> bool {
-        false
     }
 
     fn describe(&self) -> String {

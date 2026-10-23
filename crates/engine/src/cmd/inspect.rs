@@ -155,8 +155,7 @@ fn history(s: &mut Session, _: &Json) -> Result<Json> {
 
 fn list_commands(s: &mut Session, p: &Json) -> Result<Json> {
     let q = str_param(p, "search").map(str::to_ascii_lowercase);
-    let v: Vec<Json> = s
-        .commands()
+    let v: Vec<Json> = crate::agent_commands(s)
         .into_iter()
         .filter(|c| q.as_ref().is_none_or(|q| c.id.to_ascii_lowercase().contains(q.as_str()) || c.label.to_ascii_lowercase().contains(q.as_str())))
         .map(|c| serde_json::to_value(c).unwrap_or_default())

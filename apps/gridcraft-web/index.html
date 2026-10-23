@@ -1,20 +1,60 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-  <title>GridCraft</title>
-  <link data-trunk rel="icon" href="../../assets/app-icon/gridcraft.ico" />
-  <link data-trunk rel="rust" data-bin="gridcraft-web" data-wasm-opt="z" data-weak-refs />
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridCraft / Agent workspace</title>
+  <link data-trunk rel="rust" data-bin="gridcraft-web" data-wasm-opt="z" />
   <style>
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #f3f3f3; }
-    #gridcraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-    #gridcraft_loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-      color: #555; font: 14px system-ui, sans-serif; pointer-events: none; }
+    :root { color-scheme: light; font: 14px/1.5 system-ui,sans-serif; color: #23352e; background: #f4f6f3; }
+    * { box-sizing: border-box; } body { margin: 0; }
+    header { padding: 22px 32px; background: #163d30; color: #fff; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    h1 { font-size: 21px; margin: 0; font-weight: 650; letter-spacing: -.5px; } header p { margin: 3px 0 0; color: #bfd0c5; font-size: 12px; }
+    .badge { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; border: 1px solid #527565; padding: 5px 10px; border-radius: 20px; }
+    main { max-width: 1520px; margin: auto; padding: 24px 32px; }
+    .bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; } .spacer { flex: 1; }
+    h2 { font-size: 16px; margin: 0; } h3 { font-size: 13px; margin: 0; } .muted { color: #67796f; font-size: 12px; }
+    button,.file-label { font: inherit; font-size: 12px; border: 1px solid #c8d3ca; background: white; color: #214634; padding: 8px 13px; border-radius: 6px; cursor: pointer; }
+    button:hover,.file-label:hover { background: #eaf1eb; } button.primary { background: #235b43; color: white; border-color: #235b43; }
+    button:disabled { opacity: .5; cursor: wait; } :focus-visible { outline: 3px solid #abca55; outline-offset: 2px; }
+    .file-label input { position: absolute; width: 1px; height: 1px; opacity: 0; } .file-label:focus-within { outline: 3px solid #abca55; }
+    .layout { display: grid; grid-template-columns: minmax(0,1fr) 365px; gap: 20px; margin-top: 20px; }
+    .panel { background: white; border: 1px solid #dbe2db; border-radius: 10px; overflow: hidden; } .panel-head { padding: 17px 20px; border-bottom: 1px solid #e5ebe5; }
+    .panel-body { padding: 18px 20px; } .panel-body p { margin-top: 0; } .notice { background: #edf2e8; padding: 10px 14px; border-radius: 6px; margin: 16px 0; color: #4c624f; font-size: 12px; }
+    input,select,textarea { font: inherit; border: 1px solid #cdd8ce; border-radius: 5px; padding: 7px 9px; color: #23352e; background: white; }
+    textarea { width: 100%; min-height: 150px; resize: vertical; font: 12px/1.6 ui-monospace,monospace; margin: 7px 0 12px; }
+    #command { width: 100%; margin-top: 7px; } label { font-size: 12px; font-weight: 550; } #range { width: 115px; }
+    #preview { overflow: auto; max-height: 510px; min-height: 340px; } table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    td,th { min-width: 90px; max-width: 250px; height: 31px; padding: 6px 10px; border-right: 1px solid #e5ebe5; border-bottom: 1px solid #e5ebe5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    th { color: #61746a; font-weight: 500; background: #f7f9f6; position: sticky; top: 0; } tbody th { min-width: 38px; width: 38px; text-align: right; }
+    #result { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 ui-monospace,monospace; margin-bottom: 0; }
+    #status { margin: 14px 0 0; min-height: 23px; font-size: 12px; color: #45684f; overflow-wrap: anywhere; } #status.error { color: #9e3025; }
+    #dirty { font-size: 11px; padding: 3px 8px; border-radius: 4px; background: #e9eee6; }
+    footer { margin-top: 16px; font-size: 11px; color: #718076; }
+    @media(max-width: 900px) { .layout { grid-template-columns: 1fr; } main { padding: 20px 16px; } header { padding: 18px 16px; } }
   </style>
 </head>
 <body>
-  <canvas id="gridcraft_canvas"></canvas>
-  <div id="gridcraft_loading">Loading GridCraft&hellip;</div>
+  <header><div><h1>GridCraft <span style="font-weight:400;opacity:.6">/ Agent workspace</span></h1><p>Files and spreadsheet commands. No ribbon. No backend required.</p></div><span class="badge">Local · WASM</span></header>
+  <main>
+    <div class="bar"><h2 id="title">Loading engine…</h2><span id="dirty">Starting</span><span class="spacer"></span><label class="file-label">Open file<input id="file" type="file" accept=".xlsx,.xlsm,.xls,.xlsb,.ods,.csv,.tsv,.txt,.json" disabled></label><button id="download" disabled>Download XLSX</button></div>
+    <div id="status" role="status" aria-live="polite">Loading the Rust spreadsheet engine…</div>
+    <div class="layout">
+      <section class="panel"><div class="panel-head bar"><h3>Workbook preview</h3><span class="spacer"></span><label for="sheet">Sheet</label><select id="sheet" disabled></select></div>
+        <div class="panel-body bar"><label for="range">Range</label><input id="range" value="A1:H20"><button id="refresh" disabled>Refresh</button><span class="muted">Read-only · up to 1,000 cells</span></div><div id="preview"></div>
+        <div class="panel-body muted">Formatted values only. Charts, objects and layout are preserved by the engine, not rendered here.</div>
+      </section>
+      <aside class="panel"><div class="panel-head"><h3>Agent command console</h3><span class="muted">Development surface for the host API</span></div><div class="panel-body">
+        <p class="muted">Agents use structured commands, not clicks. Discover supported actions or exercise one here. No LLM is connected.</p>
+        <button id="commands" disabled>Discover commands</button>
+        <div class="notice">A same-origin host can inspect, execute and persist snapshots through the version 3 message bridge.</div>
+        <label for="command">Command ID</label><input id="command" value="range.setValues" list="command-list"><datalist id="command-list"></datalist>
+        <label for="params">Parameters · JSON</label><textarea id="params" spellcheck="false">{"range":"A1:B3","values":[["Item","Amount"],["Revenue",1200],["Total","=SUM(B2:B2)"]]}</textarea>
+        <button id="execute" class="primary" disabled>Execute command</button>
+        <details open><summary class="muted" style="margin-top:18px">Last response</summary><pre id="result">No commands executed.</pre></details>
+      </div></aside>
+    </div>
+    <footer>File data stays in this browser unless you download it or an authorized same-origin host exports it. Downloading alone does not confirm durable storage.</footer>
+  </main>
 </body>
 </html>

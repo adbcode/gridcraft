@@ -6,6 +6,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+pub mod agent_bridge;
 pub mod catalog;
 pub mod cf;
 mod clip_html;
@@ -37,6 +38,29 @@ pub use gridcraft_formula as formula;
 pub use gridcraft_model as model;
 pub use gridcraft_numfmt as numfmt;
 pub use selection::Selection;
+
+const UI_ONLY_AGENT_COMMANDS: &[&str] = &["edit.beginEdit", "formulas.insertFunction", "formulas.useInFormula", "link.open"];
+
+/// Whether a command has a useful agent-facing operation instead of only opening an editor or
+/// delegating an external action to an interactive host.
+pub fn is_agent_capable(spec: &CommandSpec) -> bool {
+    !UI_ONLY_AGENT_COMMANDS.contains(&spec.id)
+}
+
+/// The command specs discoverable to headless agents.
+pub fn agent_command_specs() -> impl Iterator<Item = &'static CommandSpec> {
+    command_specs().iter().filter(|spec| is_agent_capable(spec))
+}
+
+/// Enabled state and descriptions for commands supported by headless agents.
+pub fn agent_commands(session: &Session) -> Vec<CommandInfo> {
+    agent_command_specs().map(|spec| spec.info(session)).collect()
+}
+
+/// Whether the command id resolves to a command supported by headless agents.
+pub fn is_agent_command(id: &str) -> bool {
+    find_command(id).is_some_and(is_agent_capable)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -368,23 +392,42 @@ impl Session {
         std::mem::take(&mut self.ui_requests)
     }
 
-    /// Runs a command for a caller with no UI (MCP, CLI): queued UI requests are dropped, and a command that only
-    /// queued a file dialog because it got no file (`file.open`, `file.saveAs`, `file.save` on a workbook with no
-    /// file yet, `data.getData`) is an error instead of a silent success.
+    /// Runs a command for a caller with no UI (MCP, CLI). Informational messages are dropped;
+    /// unresolved dialogs, cell editors and external URL actions are returned as errors.
     pub fn execute_headless(&mut self, id: &str, params: Json) -> Result<Json> {
+        let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        if !is_agent_capable(spec) {
+            return Err(EngineError::Other(format!("command `{id}` is an interactive-only action and is unavailable headlessly")));
+        }
         let r = self.execute(id, params);
         let requests = self.take_ui_requests();
-        let asked_for_file = requests.iter().any(|q| matches!(q, UiRequest::Dialog(name, _) if name == "open" || name == "saveAs"));
-        if r.is_ok() && asked_for_file {
-            let what = match id {
-                "file.open" => "`path` or `base64`",
-                "data.getData" | "data.fromTextCsv" => "`path` or `text`",
-                _ => "`path`",
-            };
-            let msg = format!("missing {what}: programmatic calls never open dialogs");
-            return Err(EngineError::BadParams { cmd: id.to_string(), msg });
+        match r {
+            Ok(result) => {
+                if let Some(request) = requests.iter().find(|request| !matches!(request, UiRequest::Message(_))) {
+                    let msg = match request {
+                        UiRequest::Dialog(name, _) if name == "open" => {
+                            let fields = match id {
+                                "file.open" => "`path` or `base64`",
+                                "data.getData" | "data.fromTextCsv" => "`path` or `text`",
+                                _ => "`path`",
+                            };
+                            format!("missing {fields}: programmatic calls never open dialogs")
+                        }
+                        UiRequest::Dialog(name, _) if name == "saveAs" => "missing `path`: programmatic calls never open dialogs".to_string(),
+                        UiRequest::Dialog(name, _) if name == "saveChanges" => {
+                            "resolve the save confirmation explicitly (save first or pass `force: true`)".to_string()
+                        }
+                        UiRequest::Dialog(name, _) => format!("requires the `{name}` dialog; provide explicit parameters"),
+                        UiRequest::EditCell(_) => "requires an interactive cell editor".to_string(),
+                        UiRequest::OpenUrl(_) => "requires an interactive host to open an external URL".to_string(),
+                        UiRequest::Message(_) => String::new(),
+                    };
+                    return Err(EngineError::Other(format!("command `{id}` cannot complete headlessly: {msg}")));
+                }
+                Ok(result)
+            }
+            Err(error) => Err(error),
         }
-        r
     }
 }
 

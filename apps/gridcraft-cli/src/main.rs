@@ -9,8 +9,7 @@
 //! gridcraft-cli run [--in FILE | --sample NAME] [--cmd 'id={json}']... [--script FILE.jsonl] [--out FILE] [--print RANGE] [--quiet]
 //! gridcraft-cli commands [--json] [--search X]
 //! gridcraft-cli functions [--json] [--search X] [--category C]
-//! gridcraft-cli mcp [--connect PORT] [--in FILE | --sample NAME]
-//! gridcraft-cli send <port> <method> [json]
+//! gridcraft-cli mcp [--in FILE | --sample NAME]
 //! gridcraft-cli version | --version
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -45,8 +44,7 @@ const USAGE: &str = "usage:
                      [--out FILE] [--print RANGE] [--quiet]
   gridcraft-cli commands [--json] [--search X]
   gridcraft-cli functions [--json] [--search X] [--category C]
-  gridcraft-cli mcp [--connect PORT] [--in FILE | --sample NAME]
-  gridcraft-cli send <port> <method> [json]
+  gridcraft-cli mcp [--in FILE | --sample NAME]
   gridcraft-cli version";
 
 /// stdout went away. A reader that stopped early (a closed pipe) ends the program quietly; any
@@ -80,7 +78,6 @@ fn main() -> ExitCode {
         Some("commands") => commands(rest),
         Some("functions") => functions(rest),
         Some("mcp") => mcp(rest),
-        Some("send") => send(rest),
         Some(other) => Err(format!("unknown subcommand `{other}`\n{USAGE}")),
         None => Err(USAGE.to_string()),
     };
@@ -436,8 +433,7 @@ fn commands(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["search"], &["json"])?;
     let q = a.opt("search").or(a.positional.first().map(String::as_str)).map(str::to_ascii_lowercase);
     let s = Session::new();
-    let list: Vec<_> = s
-        .commands()
+    let list: Vec<_> = gridcraft_engine::agent_commands(&s)
         .into_iter()
         .filter(|c| {
             q.as_ref().is_none_or(|q| {
@@ -492,57 +488,25 @@ fn functions(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `mcp` (headless, in-process engine) or `mcp --connect PORT|HOST:PORT` (drive a running app
-/// started with `gridcraft --control PORT`). JSON-RPC on stdin/stdout; logs on stderr.
+/// Headless, in-process MCP server. JSON-RPC on stdin/stdout; logs on stderr.
 fn mcp(args: &[String]) -> Result<(), String> {
-    use gridcraft_mcp::{Backend, Headless, Remote, Server, control_addr};
-    let a = Args::parse(args, &["connect", "in", "sample"], &[])?;
+    use gridcraft_mcp::{Backend, Headless, Server};
+    let a = Args::parse(args, &["in", "sample"], &[])?;
     a.no_extra(0)?;
-    let backend: Box<dyn Backend> = match a.opt("connect") {
-        Some(c) => {
-            let addr = control_addr(c);
-            Box::new(
-                Remote::connect(&addr)
-                    .map_err(|e| format!("cannot connect to the GridCraft app at {addr}: {e} (start it with `gridcraft --control PORT`)"))?,
-            )
+    let session = match (a.opt("in"), a.opt("sample")) {
+        (Some(p), _) => open(p)?,
+        (None, Some(name)) => {
+            let mut s = Session::new();
+            exec(&mut s, "file.new", json!({"sample": name}))?;
+            s
         }
-        None => {
-            let session = match (a.opt("in"), a.opt("sample")) {
-                (Some(p), _) => open(p)?,
-                (None, Some(name)) => {
-                    let mut s = Session::new();
-                    exec(&mut s, "file.new", json!({"sample": name}))?;
-                    s
-                }
-                (None, None) => blank(),
-            };
-            Box::new(Headless::with_session(session))
-        }
+        (None, None) => blank(),
     };
+    let backend: Box<dyn Backend> = Box::new(Headless::with_session(session));
     eprintln!("gridcraft-cli: MCP server on stdio ({})", backend.describe());
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     Server::new(backend).serve(stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
-}
-
-/// `send PORT METHOD [JSON]`: one control-channel request to a running app.
-fn send(args: &[String]) -> Result<(), String> {
-    use gridcraft_mcp::{Backend, Remote, control_addr};
-    let port = args.first().ok_or_else(|| format!("missing <port>\n{USAGE}"))?;
-    let method = args.get(1).ok_or_else(|| format!("missing <method>\n{USAGE}"))?;
-    let params: Value = match args.get(2) {
-        Some(t) => serde_json::from_str(t).map_err(|e| format!("bad JSON params: {e}"))?,
-        None => json!({}),
-    };
-    if let Some(x) = args.get(3) {
-        return Err(format!("unexpected argument `{x}`"));
-    }
-    let addr = control_addr(port);
-    let mut r = Remote::connect(&addr)
-        .map_err(|e| format!("cannot connect to the GridCraft app at {addr}: {e} (start it with `gridcraft --control {port}`)"))?;
-    let v = r.call(method, params)?;
-    outln!("{}", pretty(&v));
-    Ok(())
 }
 
 #[cfg(test)]

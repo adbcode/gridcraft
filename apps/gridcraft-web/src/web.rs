@@ -1,407 +1,380 @@
-//! The browser shell: web `Services`, drag-and-drop, and the eframe web runner.
+use std::cell::RefCell;
+use std::rc::Rc;
 
-use gridcraft_engine::Session;
-use gridcraft_ui_egui::{Inbox, Services, SheetApp};
-use wasm_bindgen::JsCast as _;
-use wasm_bindgen::JsValue;
+use gridcraft_core::{CellRef, RangeRef};
+use gridcraft_web::{MAX_FILE_BYTES, MAX_JSON_BYTES, Reply, Request, Runtime};
+use serde_json::{Value, json};
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{Document, Element, HtmlAnchorElement, HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement, MessageEvent, Window};
 
-const CANVAS_ID: &str = "gridcraft_canvas";
-const LOADING_ID: &str = "gridcraft_loading";
+struct App {
+    runtime: Runtime,
+    document: Document,
+    window: Window,
+    parent: Option<Window>,
+    origin: String,
+    session_id: String,
+    counter: u64,
+}
+
+type Shared = Rc<RefCell<App>>;
 
 pub fn start() {
-    eframe::WebLogger::init(log::LevelFilter::Info).ok();
-    wasm_bindgen_futures::spawn_local(async {
-        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
-            log::error!("no document");
-            return;
-        };
-        let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
-            log::error!("missing <canvas id=\"{CANVAS_ID}\">");
-            return;
-        };
-        let mut options = eframe::WebOptions::default();
-        if query().contains("webgl")
-            && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
-        {
-            create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
-        }
-        // `?host=parent`: a same-origin page framing GridCraft (such as a Nextcloud app) opens
-        // workbooks in it and stores what it saves (`host`).
-        let bridge = if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new() } else { None };
-        let app_bridge = bridge.clone();
-        let result = eframe::WebRunner::new()
-            .start(
-                canvas,
-                options,
-                Box::new(move |cc| {
-                    let inbox: Inbox = Inbox::default();
-                    let mut session = Session::new();
-                    // In host mode the parent sends the workbook to edit; no sample meanwhile.
-                    let q = if app_bridge.is_some() { String::new() } else { query() };
-                    if let Some(name) = q.split(['?', '&']).find_map(|kv| kv.strip_prefix("sample=")) {
-                        let _ = session.execute("file.new", serde_json::json!({"sample": name}));
-                    } else if q.contains("sample") {
-                        let _ = session.execute("file.new", serde_json::json!({"sample": "sales"}));
-                    }
-                    let mut services = services(inbox.clone(), cc.egui_ctx.clone());
-                    if let Some(bridge) = &app_bridge {
-                        bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
-                    }
-                    let mut app = SheetApp::new(session, services);
-                    app.ui.system_theme = true;
-                    // Follow the browser's language, except a CJK one: the web build has no system
-                    // CJK fonts (none are bundled), so that interface would render as tofu.
-                    let browser = gridcraft_ui_egui::i18n::Language::system();
-                    if !matches!(
-                        browser,
-                        gridcraft_ui_egui::i18n::Language::Zh | gridcraft_ui_egui::i18n::Language::Ja | gridcraft_ui_egui::i18n::Language::Ko
-                    ) {
-                        app.ui.language = browser;
-                    }
-                    SheetApp::setup_context_for_language(&cc.egui_ctx, false, app.ui.language);
-                    if let Some(bridge) = &app_bridge {
-                        if let Some(author) = query_param("author") {
-                            crate::host::Bridge::set_author(&mut app, &author);
-                        }
-                        bridge.post_ready();
-                    }
-                    Ok(Box::new(WebShell { app, inbox, bridge: app_bridge }))
-                }),
-            )
-            .await;
-        if let (Err(e), Some(bridge)) = (&result, &bridge) {
-            bridge.post_failed(&format!("{e:?}"));
-        }
-        if let Some(el) = document.get_element_by_id(LOADING_ID) {
-            match result {
-                Ok(()) => el.remove(),
-                Err(e) => el.set_inner_html(&format!("<p>GridCraft failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
+    if let Err(error) = setup() {
+        if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(status) = document.get_element_by_id("status") {
+                status.set_text_content(Some(&format!("Could not start: {error:?}")));
+                status.set_class_name("error");
             }
         }
+    }
+}
+
+fn setup() -> Result<(), JsValue> {
+    let window = web_sys::window().ok_or("window unavailable")?;
+    let document = window.document().ok_or("document unavailable")?;
+    let parent = window.parent()?.filter(|p| !js_sys::Object::is(p, &window));
+    let app = Rc::new(RefCell::new(App {
+        runtime: Runtime::default(),
+        origin: window.location().origin()?,
+        session_id: window.crypto()?.random_uuid(),
+        document,
+        window,
+        parent,
+        counter: 0,
+    }));
+    bind(&app, "execute", "click", |app| {
+        let command = app.input("command")?;
+        let input: HtmlTextAreaElement = app.element("params")?.dyn_into().map_err(js_error)?;
+        if input.value().len() > MAX_JSON_BYTES {
+            return Err("parameters exceed 64 KiB".into());
+        }
+        let params: Value = serde_json::from_str(&input.value()).map_err(|e| format!("Invalid JSON: {e}"))?;
+        app.execute(&command, params)
+    })?;
+    bind(&app, "commands", "click", |app| {
+        let request = app.request("commands", json!({}))?;
+        let reply = app.runtime.request(request, None)?;
+        let list = app.element("command-list")?;
+        list.set_text_content(None);
+        for command in reply.result.as_array().into_iter().flatten() {
+            let option = app.document.create_element("option").map_err(js_error)?;
+            option.set_attribute("value", command["id"].as_str().unwrap_or_default()).map_err(js_error)?;
+            option.set_text_content(command["params"].as_str());
+            list.append_child(&option).map_err(js_error)?;
+        }
+        app.result(&reply.result);
+        Ok(())
+    })?;
+    bind(&app, "refresh", "click", |app| app.render())?;
+    bind(&app, "sheet", "change", |app| {
+        let select: HtmlSelectElement = app.element("sheet")?.dyn_into().map_err(js_error)?;
+        let index = select.value().parse::<usize>().map_err(|e| e.to_string())?;
+        app.execute("sheet.activate", json!({"sheet":index}))
+    })?;
+    bind(&app, "download", "click", |app| {
+        let bytes = app.runtime.download()?;
+        download(&app.document, &bytes).map_err(js_error)?;
+        app.status("Download started. The browser cannot confirm that it was saved; dirty state is unchanged.", false);
+        Ok(())
+    })?;
+    bind_file(&app)?;
+    bind_host(&app)?;
+    let shared = app.clone();
+    let unload = Closure::<dyn FnMut(web_sys::BeforeUnloadEvent)>::new(move |event: web_sys::BeforeUnloadEvent| {
+        if shared.borrow().runtime.session.active().is_some_and(|d| d.is_dirty()) {
+            event.prevent_default();
+            event.set_return_value("");
+        }
     });
+    app.borrow().window.add_event_listener_with_callback("beforeunload", unload.as_ref().unchecked_ref())?;
+    unload.forget();
+    {
+        let mut app = app.borrow_mut();
+        app.render().map_err(|e| JsValue::from_str(&e))?;
+        for id in ["file", "download", "execute", "commands", "refresh", "sheet"] {
+            app.element(id).map_err(|e| JsValue::from_str(&e))?.remove_attribute("disabled")?;
+        }
+        app.status("Engine ready. Open a file or run a command against the blank workbook.", false);
+        app.ready();
+    }
+    Ok(())
 }
 
-fn query() -> String {
-    web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
+fn js_error(error: impl Into<JsValue>) -> String {
+    let error = error.into();
+    error.as_string().unwrap_or_else(|| format!("{error:?}"))
 }
 
-fn query_param(key: &str) -> Option<String> {
-    web_sys::UrlSearchParams::new_with_str(&query()).ok()?.get(key)
+fn bind(app: &Shared, id: &str, event: &str, mut f: impl FnMut(&mut App) -> Result<(), String> + 'static) -> Result<(), JsValue> {
+    let element = app.borrow().element(id).map_err(|e| JsValue::from_str(&e))?;
+    let shared = app.clone();
+    let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        let mut app = shared.borrow_mut();
+        if let Err(error) = f(&mut app) {
+            app.status(&error, true);
+        }
+    });
+    element.add_event_listener_with_callback(event, callback.as_ref().unchecked_ref())?;
+    callback.forget();
+    Ok(())
 }
 
-struct WebShell {
-    app: SheetApp,
-    inbox: Inbox,
-    bridge: Option<crate::host::Bridge>,
-}
+impl App {
+    fn element(&self, id: &str) -> Result<Element, String> {
+        self.document.get_element_by_id(id).ok_or_else(|| format!("missing {id}"))
+    }
 
-impl eframe::App for WebShell {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
-        for f in dropped {
-            let inbox = self.inbox.clone();
-            let ctx = ctx.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "dropped.xlsx".into());
-                match f.bytes_async().await {
-                    Ok(bytes) => {
-                        inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes));
-                        ctx.request_repaint();
-                    }
-                    Err(e) => log::error!("couldn't read dropped file {name}: {e}"),
+    fn input(&self, id: &str) -> Result<String, String> {
+        Ok(self.element(id)?.dyn_into::<HtmlInputElement>().map_err(js_error)?.value())
+    }
+
+    fn status(&self, message: &str, error: bool) {
+        if let Ok(status) = self.element("status") {
+            status.set_text_content(Some(message));
+            status.set_class_name(if error { "error" } else { "" });
+        }
+    }
+
+    fn result(&self, value: &Value) {
+        if let Ok(element) = self.element("result") {
+            let text = serde_json::to_string_pretty(value).unwrap_or_default();
+            let mut limited: String = text.chars().take(24_000).collect();
+            if text.chars().count() > 24_000 {
+                limited.push_str("\n… response truncated in this preview");
+            }
+            element.set_text_content(Some(&limited));
+        }
+    }
+
+    fn request(&mut self, method: &str, mut params: Value) -> Result<Request, String> {
+        self.counter = self.counter.checked_add(1).ok_or("request counter exhausted")?;
+        if !matches!(method, "commands" | "context" | "snapshot.ack") {
+            params["expected"] = self.runtime.context()?["identity"].clone();
+        }
+        Ok(Request { id: format!("local-{}", self.counter), method: method.into(), params })
+    }
+
+    fn execute(&mut self, command: &str, params: Value) -> Result<(), String> {
+        let request = self.request("execute", json!({"command":command, "params":params}))?;
+        let outcome = self.runtime.request(request, None);
+        self.render()?;
+        match outcome {
+            Ok(reply) => {
+                self.result(&reply.result);
+                self.status("Command completed. Inspect the result and workbook preview.", false);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn render(&mut self) -> Result<(), String> {
+        if let Some(doc) = self.runtime.session.active() {
+            self.element("title")?.set_text_content(Some(&doc.title));
+            self.element("dirty")?.set_text_content(Some(if doc.is_dirty() { "Unsaved changes" } else { "Unchanged" }));
+            let select = self.element("sheet")?;
+            select.set_text_content(None);
+            for (index, sheet) in doc.wb.sheets.iter().enumerate() {
+                let option = self.document.create_element("option").map_err(js_error)?;
+                option.set_attribute("value", &index.to_string()).map_err(js_error)?;
+                option.set_text_content(Some(&sheet.name));
+                if index == doc.sheet_index() {
+                    option.set_attribute("selected", "").map_err(js_error)?;
                 }
-            });
-        }
-        self.app.logic(ctx);
-    }
-
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
-        self.app.raw_input_hook(raw);
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.app.ui(ui);
-        if let Some(bridge) = &self.bridge {
-            bridge.sync(&mut self.app);
-        }
-    }
-}
-
-fn services(inbox: Inbox, ctx: egui::Context) -> Services {
-    let open_inbox = inbox.clone();
-    let picture_ctx = ctx.clone();
-    Services {
-        copy_html: Some(Box::new(copy_html)),
-        open_async: Some(Box::new(move || {
-            let inbox = open_inbox.clone();
-            let ctx = ctx.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let Some(file) = rfd::AsyncFileDialog::new()
-                    .add_filter("Spreadsheets", &["xlsx", "xlsm", "xls", "xlsb", "ods", "csv", "tsv", "txt", "json"])
-                    .pick_file()
-                    .await
-                else {
-                    return;
-                };
-                let bytes = file.read().await;
-                inbox.lock().unwrap_or_else(|e| e.into_inner()).push((file.file_name(), bytes));
-                ctx.request_repaint();
-            });
-        })),
-        pick_picture_async: Some(Box::new(move |inbox| {
-            let ctx = picture_ctx.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let Some(file) = rfd::AsyncFileDialog::new().add_filter("Pictures (PNG, JPEG)", &["png", "jpg", "jpeg"]).pick_file().await else {
-                    return;
-                };
-                let bytes = file.read().await;
-                inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((file.file_name(), bytes));
-                ctx.request_repaint();
-            });
-        })),
-        download: Some(Box::new(|name: &str, bytes: &[u8]| {
-            if let Err(e) = download(name, bytes) {
-                log::error!("download of {name} failed: {e}");
-            }
-        })),
-        print: Some(Box::new(|bytes: &[u8]| {
-            if let Err(e) = print_pdf(bytes) {
-                log::error!("print failed: {e}");
-            }
-        })),
-        open_url: Some(Box::new(|url: &str| {
-            if let Some(w) = web_sys::window()
-                && let gridcraft_engine::links::LinkKind::External(url) = gridcraft_engine::links::classify(url)
-            {
-                let _ = w.open_with_url_and_target(&url, "_blank");
-            }
-        })),
-        inbox: Some(inbox),
-        ..Default::default()
-    }
-}
-
-/// Start inside the copy gesture; deferring `write` can lose browser user activation.
-fn copy_html(html: &str, text: &str) -> Result<(), String> {
-    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let window = web_sys::window().ok_or("no window")?;
-    let clipboard = window.navigator().clipboard();
-    if clipboard.is_undefined() || clipboard.is_null() {
-        return Err("browser clipboard is unavailable (a secure context is required)".into());
-    }
-    if !js_sys::Reflect::get(&clipboard, &"write".into()).map_err(js)?.is_function() {
-        return Err("browser does not support rich clipboard writes".into());
-    }
-    let data = js_sys::Object::new();
-    for (mime, value) in [("text/html", html), ("text/plain", text)] {
-        let opts = web_sys::BlobPropertyBag::new();
-        opts.set_type(mime);
-        let parts = js_sys::Array::of1(&wasm_bindgen::JsValue::from_str(value));
-        let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &opts).map_err(js)?;
-        js_sys::Reflect::set(&data, &mime.into(), &blob).map_err(js)?;
-    }
-    let item = web_sys::ClipboardItem::new_with_record_from_str_to_blob_promise(&data).map_err(js)?;
-    let promise = clipboard.write(&js_sys::Array::of1(&item));
-    let text = text.to_owned();
-    wasm_bindgen_futures::spawn_local(async move {
-        if let Err(e) = wasm_bindgen_futures::JsFuture::from(promise).await {
-            log::warn!("Rich clipboard write failed; trying plain text: {e:?}");
-            if let Err(e) = wasm_bindgen_futures::JsFuture::from(clipboard.write_text(&text)).await {
-                log::error!("Plain-text clipboard fallback also failed: {e:?}");
+                select.append_child(&option).map_err(js_error)?;
             }
         }
-    });
-    Ok(())
-}
-
-/// Opens `bytes` (a PDF) as an object URL in a hidden iframe and calls the iframe's own
-/// `print()` once it has finished loading — the standard way to drive the browser's native print
-/// dialog on a PDF without a download or a popup window the browser might block. The blob URL and
-/// the iframe are both cleaned up once the print dialog closes, so repeated prints don't leak
-/// them.
-fn print_pdf(bytes: &[u8]) -> Result<(), String> {
-    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let window = web_sys::window().ok_or("no window")?;
-    let document = window.document().ok_or("no document")?;
-
-    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
-    let opts = web_sys::BlobPropertyBag::new();
-    opts.set_type("application/pdf");
-    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).map_err(js)?;
-    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(js)?;
-
-    let iframe: web_sys::HtmlIFrameElement = document.create_element("iframe").map_err(js)?.dyn_into().map_err(|_| "not an iframe")?;
-    iframe.style().set_property("display", "none").map_err(js)?;
-    document.body().ok_or("no body")?.append_child(&iframe).map_err(js)?;
-
-    // `onload` fires once the PDF has actually rendered inside the iframe;
-    // printing before that would show a blank page. Set the handler BEFORE
-    // `src` so a fast/cached load can't fire before we're listening.
-    let iframe_for_load = iframe.clone();
-    let url_for_cleanup = url.clone();
-    let on_load = wasm_bindgen::closure::Closure::once_into_js(move || {
-        let Some(content_window) = iframe_for_load.content_window() else { return };
-        let _ = content_window.print();
-        // `afterprint` fires once the print dialog (or print preview) closes, whether the user
-        // printed or cancelled — the right moment to release the blob URL and drop the iframe.
-        let iframe_for_cleanup = iframe_for_load.clone();
-        let on_after_print = wasm_bindgen::closure::Closure::once_into_js(move || {
-            web_sys::Url::revoke_object_url(&url_for_cleanup).ok();
-            iframe_for_cleanup.remove();
-        });
-        let _ = content_window.add_event_listener_with_callback("afterprint", on_after_print.unchecked_ref());
-    });
-    iframe.set_onload(Some(on_load.unchecked_ref()));
-    iframe.set_src(&url);
-    Ok(())
-}
-
-fn mime_for(name: &str) -> &'static str {
-    match name.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
-        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        Some("xlsm") => "application/vnd.ms-excel.sheet.macroEnabled.12",
-        Some("xlsb") => "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
-        Some("ods") => "application/vnd.oasis.opendocument.spreadsheet",
-        Some("csv") => "text/csv",
-        Some("tsv" | "txt") => "text/plain",
-        Some("pdf") => "application/pdf",
-        Some("html" | "htm") => "text/html",
-        Some("json") => "application/json",
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        _ => "application/octet-stream",
+        let text = self.input("range")?;
+        let range = RangeRef::parse(&text).ok_or("invalid preview range")?;
+        let data = self.runtime.preview(&text)?;
+        let table = self.document.create_element("table").map_err(js_error)?;
+        table.set_attribute("aria-label", "Workbook values").map_err(js_error)?;
+        let head = self.document.create_element("thead").map_err(js_error)?;
+        let row = self.document.create_element("tr").map_err(js_error)?;
+        self.cell(&row, "th", "")?;
+        for col in range.start.col..=range.end.col {
+            let label = CellRef::new(0, col).a1();
+            self.cell(&row, "th", label.trim_end_matches('1'))?;
+        }
+        head.append_child(&row).map_err(js_error)?;
+        table.append_child(&head).map_err(js_error)?;
+        let body = self.document.create_element("tbody").map_err(js_error)?;
+        for (offset, values) in data["values"].as_array().into_iter().flatten().enumerate() {
+            let row = self.document.create_element("tr").map_err(js_error)?;
+            self.cell(&row, "th", &(range.start.row as usize + offset + 1).to_string())?;
+            for value in values.as_array().into_iter().flatten() {
+                self.cell(&row, "td", &value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))?;
+            }
+            body.append_child(&row).map_err(js_error)?;
+        }
+        table.append_child(&body).map_err(js_error)?;
+        let preview = self.element("preview")?;
+        preview.set_text_content(None);
+        preview.append_child(&table).map_err(js_error)?;
+        Ok(())
     }
-}
 
-/// Trigger a browser save dialog or download of `bytes` named after `name`.
+    fn cell(&self, row: &Element, tag: &str, text: &str) -> Result<(), String> {
+        let cell = self.document.create_element(tag).map_err(js_error)?;
+        cell.set_text_content(Some(text));
+        row.append_child(&cell).map_err(js_error)?;
+        Ok(())
+    }
 
-fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
-    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let window = web_sys::window().ok_or("no window")?;
+    fn ready(&mut self) {
+        let context = self.runtime.context().unwrap_or(Value::Null);
+        let _ = self.post(&json!({"type":"gridcraft:ready", "protocol":3, "session_id":self.session_id,
+            "capabilities":["context","commands","inspect","execute","set_values","undo","open","snapshot.export","snapshot.ack"], "context":context}), None);
+    }
 
-    let show_picker_fn: Option<js_sys::Function> =
-        js_sys::Reflect::get(&window, &JsValue::from_str("showSaveFilePicker")).ok().and_then(|v| v.dyn_into().ok());
-
-    if let Some(picker_fn) = show_picker_fn {
-        let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("xlsx").to_ascii_lowercase();
-        let dot_ext = format!(".{ext}");
-        let mime = mime_for(name);
-
-        let accept_obj = js_sys::Object::new();
-        let exts_arr = js_sys::Array::new();
-        exts_arr.push(&JsValue::from_str(&dot_ext));
-        let _ = js_sys::Reflect::set(&accept_obj, &JsValue::from_str(mime), &exts_arr);
-
-        let type_desc = match ext.as_str() {
-            "xlsx" => "Excel Workbook (*.xlsx)",
-            "xlsm" => "Excel Macro-Enabled Workbook (*.xlsm)",
-            "xlsb" => "Excel Binary Workbook (*.xlsb)",
-            "ods" => "OpenDocument Spreadsheet (*.ods)",
-            "csv" => "CSV (Comma delimited) (*.csv)",
-            "tsv" => "Tab Delimited Text (*.tsv)",
-            "txt" => "Plain Text (*.txt)",
-            "pdf" => "PDF Document (*.pdf)",
-            "html" | "htm" => "HTML Document (*.html)",
-            "json" => "JSON Document (*.json)",
-            "png" => "PNG Image (*.png)",
-            "jpg" | "jpeg" => "JPEG Image (*.jpeg)",
-            _ => "Spreadsheet",
+    fn post(&self, message: &Value, bytes: Option<&[u8]>) -> Result<(), JsValue> {
+        let Some(parent) = &self.parent else {
+            return Ok(());
         };
+        let message = js_sys::JSON::parse(&message.to_string())?;
+        let transfer = js_sys::Array::new();
+        if let Some(bytes) = bytes {
+            let buffer = js_sys::Uint8Array::from(bytes).buffer();
+            js_sys::Reflect::set(&message, &"bytes".into(), &buffer)?;
+            transfer.push(&buffer);
+        }
+        parent.post_message_with_transfer(&message, &self.origin, &transfer)
+    }
+}
 
-        let type_obj = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(&type_obj, &JsValue::from_str("description"), &JsValue::from_str(type_desc));
-        let _ = js_sys::Reflect::set(&type_obj, &JsValue::from_str("accept"), &accept_obj);
-
-        let types_arr = js_sys::Array::new();
-        types_arr.push(&type_obj);
-
-        let picker_opts = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(&picker_opts, &JsValue::from_str("suggestedName"), &JsValue::from_str(name));
-        let _ = js_sys::Reflect::set(&picker_opts, &JsValue::from_str("types"), &types_arr);
-
-        let prom_val = picker_fn.call1(&window, &picker_opts).map_err(js)?;
-        let prom: js_sys::Promise = prom_val.dyn_into().map_err(|_| "not a promise".to_string())?;
-
-        let bytes_vec = bytes.to_vec();
-        let name_owned = name.to_string();
-        // Anything but the user cancelling (no user gesture, a denied permission, a failed write)
-        // falls back to an ordinary download, so a save never fails silently.
-        let fallback = move |bytes: &[u8]| {
-            if let Some(w) = web_sys::window()
-                && let Err(e) = trigger_anchor_download(&w, &name_owned, bytes)
-            {
-                log::error!("download fallback failed: {e}");
+fn bind_file(app: &Shared) -> Result<(), JsValue> {
+    let input: HtmlInputElement = app.borrow().element("file").map_err(|e| JsValue::from_str(&e))?.dyn_into()?;
+    let shared = app.clone();
+    let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        let Some(file) = input.files().and_then(|files| files.get(0)) else {
+            return;
+        };
+        input.set_value("");
+        if file.size() > MAX_FILE_BYTES as f64 {
+            shared.borrow().status("File exceeds the 16 MiB browser import limit.", true);
+            return;
+        }
+        let request = {
+            let mut app = shared.borrow_mut();
+            let dirty = app.runtime.session.active().is_some_and(|d| d.is_dirty());
+            if dirty && !app.window.confirm_with_message("Discard unsaved changes and open another file?").unwrap_or(false) {
+                return;
+            }
+            match app.request("open", json!({"name":file.name(), "discardChanges":dirty})) {
+                Ok(request) => request,
+                Err(error) => {
+                    app.status(&error, true);
+                    return;
+                }
             }
         };
+        let shared = shared.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            match wasm_bindgen_futures::JsFuture::from(prom).await {
-                Ok(handle_val) => {
-                    if let Err(e) = write_file_handle(&handle_val, &bytes_vec).await {
-                        log::error!("failed writing to file handle: {e}");
-                        fallback(&bytes_vec);
-                    } else {
-                        log::info!("Successfully saved file through save file picker");
+            let loaded = JsFuture::from(file.array_buffer()).await;
+            let mut app = shared.borrow_mut();
+            match loaded {
+                Ok(buffer) => {
+                    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+                    match app.runtime.request(request, Some(&bytes)) {
+                        Ok(reply) => {
+                            app.result(&reply.result);
+                            match app.render() {
+                                Ok(()) => app.status("File opened. Review import warnings in the response.", false),
+                                Err(error) => app.status(&error, true),
+                            }
+                        }
+                        Err(error) => app.status(&error, true),
                     }
                 }
-                Err(e) => {
-                    let err_name = js_sys::Reflect::get(&e, &JsValue::from_str("name")).ok().and_then(|v| v.as_string()).unwrap_or_default();
-                    if err_name == "AbortError" {
-                        log::info!("Save file dialog cancelled by user");
-                    } else {
-                        log::warn!("showSaveFilePicker refused ({err_name}); downloading instead");
-                        fallback(&bytes_vec);
-                    }
-                }
+                Err(error) => app.status(&js_error(error), true),
             }
         });
-        return Ok(());
-    }
-
-    // Fallback for browsers without showSaveFilePicker (e.g. Firefox, Safari):
-    trigger_anchor_download(&window, name, bytes)
-}
-
-async fn write_file_handle(handle: &JsValue, bytes: &[u8]) -> Result<(), String> {
-    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let create_fn: js_sys::Function = js_sys::Reflect::get(handle, &JsValue::from_str("createWritable"))
-        .map_err(js)?
-        .dyn_into()
-        .map_err(|_| "createWritable is not a function".to_string())?;
-    let stream_prom: js_sys::Promise = create_fn.call0(handle).map_err(js)?.dyn_into().map_err(|_| "not a promise".to_string())?;
-    let stream = wasm_bindgen_futures::JsFuture::from(stream_prom).await.map_err(js)?;
-
-    let write_fn: js_sys::Function =
-        js_sys::Reflect::get(&stream, &JsValue::from_str("write")).map_err(js)?.dyn_into().map_err(|_| "write is not a function".to_string())?;
-    let uint8 = js_sys::Uint8Array::from(bytes);
-    let write_prom: js_sys::Promise = write_fn.call1(&stream, &uint8).map_err(js)?.dyn_into().map_err(|_| "not a promise".to_string())?;
-    wasm_bindgen_futures::JsFuture::from(write_prom).await.map_err(js)?;
-
-    let close_fn: js_sys::Function =
-        js_sys::Reflect::get(&stream, &JsValue::from_str("close")).map_err(js)?.dyn_into().map_err(|_| "close is not a function".to_string())?;
-    let close_prom: js_sys::Promise = close_fn.call0(&stream).map_err(js)?.dyn_into().map_err(|_| "not a promise".to_string())?;
-    wasm_bindgen_futures::JsFuture::from(close_prom).await.map_err(js)?;
+    });
+    app.borrow().element("file").map_err(|e| JsValue::from_str(&e))?.add_event_listener_with_callback("change", callback.as_ref().unchecked_ref())?;
+    callback.forget();
     Ok(())
 }
 
-fn trigger_anchor_download(window: &web_sys::Window, name: &str, bytes: &[u8]) -> Result<(), String> {
-    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let document = window.document().ok_or("no document")?;
-    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
-    let opts = web_sys::BlobPropertyBag::new();
-    opts.set_type(mime_for(name));
-    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).map_err(js)?;
-    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(js)?;
-    let a: web_sys::HtmlAnchorElement = document.create_element("a").map_err(js)?.dyn_into().map_err(|_| "not an anchor".to_string())?;
-    a.set_href(&url);
-    a.set_download(name);
-    a.style().set_property("display", "none").map_err(js)?;
-    let body = document.body().ok_or("no body")?;
-    body.append_child(&a).map_err(js)?;
-    a.click();
-    a.remove();
-    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
-        web_sys::Url::revoke_object_url(&url).ok();
+fn bind_host(app: &Shared) -> Result<(), JsValue> {
+    let shared = app.clone();
+    let callback = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let mut app = shared.borrow_mut();
+        if event.origin() != app.origin
+            || app.origin == "null"
+            || !app.parent.as_ref().is_some_and(|parent| event.source().is_some_and(|source| js_sys::Object::is(&source, parent)))
+        {
+            return;
+        }
+        let data = event.data();
+        let get = |key: &str| js_sys::Reflect::get(&data, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
+        if get("type").as_string().as_deref() == Some("gridcraft:hello") {
+            app.ready();
+            return;
+        }
+        if get("type").as_string().as_deref() != Some("gridcraft:request") || get("session_id").as_string().as_deref() != Some(&app.session_id) {
+            return;
+        }
+        let id = get("id").as_string().unwrap_or_default();
+        if id.starts_with("local-") {
+            return;
+        }
+        let outcome = (|| -> Result<Reply, String> {
+            let method = get("method").as_string().ok_or("method required")?;
+            let text = js_sys::JSON::stringify(&get("params")).map_err(js_error)?.as_string().ok_or("params required")?;
+            if text.len() > MAX_JSON_BYTES {
+                return Err("JSON exceeds 64 KiB".into());
+            }
+            let params = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            let binary = get("bytes");
+            let bytes = if binary.is_undefined() {
+                None
+            } else {
+                let array = if binary.is_instance_of::<js_sys::ArrayBuffer>() {
+                    js_sys::Uint8Array::new(&binary)
+                } else {
+                    binary.dyn_into::<js_sys::Uint8Array>().map_err(|_| "bytes must be an ArrayBuffer or Uint8Array")?
+                };
+                if array.length() as usize > MAX_FILE_BYTES {
+                    return Err("file exceeds 16 MiB".into());
+                }
+                Some(array.to_vec())
+            };
+            app.runtime.request(Request { id: id.clone(), method, params }, bytes.as_deref())
+        })();
+        let _ = app.render();
+        let (message, bytes) = match outcome {
+            Ok(reply) => (json!({"type":"gridcraft:response", "session_id":app.session_id, "id":id, "ok":true, "result":reply.result}), reply.bytes),
+            Err(error) => (json!({"type":"gridcraft:response", "session_id":app.session_id, "id":id, "ok":false, "error":error}), None),
+        };
+        if let Err(error) = app.post(&message, bytes.as_deref()) {
+            app.status(&format!("Host response failed: {}", js_error(error)), true);
+        }
     });
-    window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000).map_err(js)?;
+    app.borrow().window.add_event_listener_with_callback("message", callback.as_ref().unchecked_ref())?;
+    callback.forget();
+    Ok(())
+}
+
+fn download(document: &Document, bytes: &[u8]) -> Result<(), JsValue> {
+    let parts = js_sys::Array::new();
+    parts.push(&js_sys::Uint8Array::from(bytes));
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+    let link: HtmlAnchorElement = document.create_element("a")?.dyn_into()?;
+    link.set_href(&url);
+    link.set_download("Workbook.xlsx");
+    let body = document.body().ok_or("document body missing")?;
+    body.append_child(&link)?;
+    link.click();
+    link.remove();
+    // Let the browser consume the download URL before releasing it.
+    let callback = Closure::once_into_js(move || {
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
+    if let Some(window) = web_sys::window() {
+        window.set_timeout_with_callback_and_timeout_and_arguments_0(callback.unchecked_ref(), 1_000)?;
+    }
     Ok(())
 }

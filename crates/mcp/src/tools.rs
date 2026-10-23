@@ -4,7 +4,6 @@
 use serde_json::{Map, Value, json};
 
 use crate::backend::Backend;
-use crate::headless::NO_UI;
 
 /// The result of `tools/call`: MCP content blocks plus the `isError` flag.
 #[derive(Clone, Debug, PartialEq)]
@@ -357,13 +356,6 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         tool("redo", "Redo", "Redo the last undone change(s).", obj(json!({"steps": int("Number of steps (default 1)")}), &[]), false),
         tool(
-            "screenshot",
-            "Screenshot",
-            "Save a PNG screenshot of the GridCraft window to `path`. Desktop app only (`gridcraft-cli mcp --connect 7979`).",
-            obj(json!({"path": string("Output PNG path")}), &["path"]),
-            true,
-        ),
-        tool(
             "list_functions",
             "List functions",
             "List worksheet functions: name, category, signature and description. Filter with `search` (name or description) or `category`.",
@@ -588,13 +580,6 @@ fn save_workbook(b: &mut dyn Backend, a: &Args) -> Result<Value, String> {
     exec(b, "file.save", pick(a, &["path"]))
 }
 
-fn screenshot(b: &mut dyn Backend, a: &Args) -> Result<Value, String> {
-    if !b.has_ui() {
-        return Err(NO_UI.into());
-    }
-    b.call("ui.screenshot", json!({"path": req_str(a, "path")?}))
-}
-
 fn dispatch(b: &mut dyn Backend, name: &str, a: &Args) -> Result<Value, String> {
     match name {
         "execute_command" => {
@@ -631,7 +616,6 @@ fn dispatch(b: &mut dyn Backend, name: &str, a: &Args) -> Result<Value, String> 
         "new_workbook" => exec(b, "file.new", pick(a, &["sample"])),
         "undo" => exec(b, "edit.undo", pick(a, &["steps"])),
         "redo" => exec(b, "edit.redo", pick(a, &["steps"])),
-        "screenshot" => screenshot(b, a),
         "list_functions" => exec(b, "formulas.functions", pick(a, &["search", "category"])),
         other => Err(format!("unknown tool `{other}`")),
     }

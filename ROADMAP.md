@@ -21,16 +21,17 @@ same-origin host bridge. There is no connected LLM, agent provider, or server-si
 - [x] Remove the native desktop UI, application, and native packaging workflows.
 - [x] Keep the web host boundary explicit: byte-based imports/exports and shell-managed workbook
   lifecycle.
-- [ ] Complete focused engine/MCP/CLI/web tests and the local `cargo xtask ci` gate.
-- [ ] Review the built browser shell visually and resolve any remaining integration defects.
+- [x] Complete focused engine/MCP/CLI/web tests and the local `cargo xtask ci` gate.
+- [x] Review the browser shell, formula readback, and protocol-3 host transport in Chrome. The lead
+  verified 14 same-origin iframe assertions against `607e6f2`, including command filtering,
+  formula recalculation, exact retry and duplicate rejection, stale-identity conflicts, path
+  rejection, transferred XLSX snapshots, dirty-state acknowledgement, and binary reopen.
 
 ## Next
 
-1. Validate protocol-3 command discovery, conflict handling, binary imports/exports, and receipt
-   replay in the browser host.
-2. Improve workbook capability coverage based on agent workflows, without reintroducing native UI
+1. Improve workbook capability coverage based on agent workflows, without reintroducing native UI
    requirements.
-3. Keep the architectural and capability maps current as commands gain explicit parameterized
+2. Keep the architectural and capability maps current as commands gain explicit parameterized
    operations.
 
 ## Reference

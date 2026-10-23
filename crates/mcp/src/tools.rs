@@ -113,8 +113,9 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "execute_command",
             "Execute command",
-            "Run ANY GridCraft command by id with JSON params — every ribbon/menu action is a command. Find ids and parameter \
-             docs with list_commands. Examples: {\"command\":\"cell.set\",\"params\":{\"cell\":\"B2\",\"input\":\"=SUM(A1:A9)\"}}; \
+            "Run a supported headless GridCraft command by id with JSON params. The shared capability policy excludes pure editor/dialog \
+             entry points and external-URL actions; parameterized engine operations remain available when meaningful headlessly. Find ids \
+             and parameter docs with list_commands. Examples: {\"command\":\"cell.set\",\"params\":{\"cell\":\"B2\",\"input\":\"=SUM(A1:A9)\"}}; \
              {\"command\":\"home.bold\",\"params\":{\"range\":\"A1:C1\"}}; {\"command\":\"sheet.insert\"}; \
              {\"command\":\"data.removeDuplicates\",\"params\":{\"range\":\"A1:C20\"}}. Most commands act on the current selection \
              when `range` is omitted. Programmatic calls never open dialogs: missing required params give an error.",

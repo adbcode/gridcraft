@@ -84,7 +84,7 @@ struct Observed {
     mode: Mode,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct Receipt {
     method: String,
     params: Json,
@@ -215,7 +215,9 @@ impl BridgeState {
                 }
                 let commands: Vec<CommandInfo> =
                     agent_command_specs().filter(|spec| browser_command_allowed(spec.id)).map(|spec| spec.info(session)).collect();
-                encode(commands)
+                let result = encode(commands)?;
+                bounded_json(&result, MAX_RESPONSE_BYTES)?;
+                Ok(result)
             }
             "inspect" => {
                 let p: InspectParams = decode(params)?;
@@ -242,8 +244,19 @@ impl BridgeState {
         if self.receipts.len() >= MAX_REQUESTS {
             return Err(error("limit", "request receipt limit reached; reopen the editor before issuing new request IDs"));
         }
-        let outcome = self.apply_execute(session, &p);
-        self.receipts.insert(p.request_id, Receipt { method: "execute".into(), params, outcome: outcome.clone() });
+        let mut outcome = self.apply_execute(session, &p);
+        let mut receipt = Receipt { method: "execute".into(), params, outcome: outcome.clone() };
+        if bounded_serialized(&receipt, MAX_RESPONSE_BYTES).is_err() {
+            outcome = match outcome {
+                Ok(result) => Ok(omitted_execute_result(&p.request_id, &result)?),
+                Err(failure) => {
+                    Err(error(failure.code, "command failed, but error details were omitted to fit the 256 KiB response and receipt limits"))
+                }
+            };
+            receipt.outcome = outcome.clone();
+        }
+        bounded_serialized(&receipt, MAX_RESPONSE_BYTES)?;
+        self.receipts.insert(p.request_id, receipt);
         outcome
     }
 
@@ -265,15 +278,16 @@ impl BridgeState {
             return Err(error("limit", "change token exhausted; reopen the editor"));
         }
         let command_result = session.execute_headless(&p.command, p.params.clone()).map_err(|e| error("command_failed", e.to_string()))?;
-        match self.observe(session) {
-            Ok(context) => encode(json!({"request_id": p.request_id, "command_result": command_result, "context": context})),
-            Err(e) => encode(json!({
+        let response = match self.observe(session) {
+            Ok(context) => json!({"request_id": p.request_id, "command_result": command_result, "context": context}),
+            Err(e) => json!({
                 "request_id": p.request_id,
                 "command_result": command_result,
                 "applied": true,
                 "verification_error": e
-            })),
-        }
+            }),
+        };
+        bounded_execute_result(&p.request_id, response)
     }
 
     fn mutate(&mut self, session: &mut Session, method: &str, params: Json) -> Result<Json> {
@@ -449,6 +463,34 @@ fn encode(value: impl Serialize) -> Result<Json> {
 }
 
 /// Bound serialized size without first allocating a second potentially enormous JSON string.
+fn bounded_execute_result(request_id: &str, response: Json) -> Result<Json> {
+    if bounded_json(&response, MAX_RESPONSE_BYTES).is_ok() {
+        return Ok(response);
+    }
+    omitted_execute_result(request_id, &response)
+}
+
+fn omitted_execute_result(request_id: &str, response: &Json) -> Result<Json> {
+    let mut omitted = json!({
+        "request_id": request_id,
+        "applied": true,
+        "response_omitted": true,
+        "message": "The command was applied, but its result was omitted to fit the 256 KiB response and receipt limits. Use a smaller range or an export operation."
+    });
+    if let Some(context) = response.get("context") {
+        omitted["context"] = context.clone();
+    } else if let Some(code) = response.get("verification_error").and_then(|e| e.get("code")).and_then(Json::as_str) {
+        omitted["verification_error"] = json!({
+            "code": code,
+            "message": "Context observation failed after the command; query context before the next mutation."
+        });
+    } else if response.get("verification_error").is_some() {
+        omitted["verification_error"] = json!("Context observation failed after the command; query context before the next mutation.");
+    }
+    bounded_json(&omitted, MAX_RESPONSE_BYTES)?;
+    Ok(omitted)
+}
+
 fn bounded_json(value: &Json, limit: usize) -> Result<()> {
     fn shape(value: &Json, depth: usize, nodes: &mut usize) -> Result<()> {
         *nodes = nodes.saturating_add(1);
@@ -471,6 +513,10 @@ fn bounded_json(value: &Json, limit: usize) -> Result<()> {
         Ok(())
     }
     shape(value, 0, &mut 0)?;
+    bounded_serialized(value, limit)
+}
+
+fn bounded_serialized(value: &impl Serialize, limit: usize) -> Result<()> {
     struct LimitedWriter {
         used: usize,
         limit: usize,
@@ -865,6 +911,37 @@ mod tests {
         let doc = session.doc().unwrap();
         let style = doc.wb.styles.get(doc.wb.active().unwrap().style_id(CellRef::parse("A1").unwrap()));
         assert!(style.font.bold);
+    }
+
+    #[test]
+    fn oversized_generic_execute_omits_result_and_replays_bounded_outcome() {
+        let (mut session, mut bridge) = setup();
+        let text = "x".repeat(50_000);
+        let values: Vec<_> = (0..6).map(|_| vec![json!(text.clone())]).collect();
+        session.execute("range.setValues", json!({"range": "A1", "values": values})).unwrap();
+        let range = json!({"range": "A1:A6"});
+        let original = session.execute_headless("sheet.read", range.clone()).unwrap();
+        assert!(matches!(bounded_json(&original, MAX_RESPONSE_BYTES), Err(e) if e.message == "JSON size limit exceeded"));
+
+        let expected = identity(&mut bridge, &session);
+        let request = json!({
+            "request_id": "oversized-read",
+            "expected": expected,
+            "command": "sheet.read",
+            "params": range
+        });
+        let first = bridge.handle(&mut session, "execute", request.clone()).unwrap();
+        assert_eq!(first["applied"], true);
+        assert_eq!(first["response_omitted"], true);
+        assert!(first["message"].as_str().is_some_and(|message| message.contains("smaller range") && message.contains("export")));
+        assert!(first.get("context").is_some());
+        assert!(first.get("command_result").is_none());
+        assert!(bounded_json(&first, MAX_RESPONSE_BYTES).is_ok());
+        let receipt = bridge.receipts.get("oversized-read").unwrap();
+        assert!(bounded_serialized(receipt, MAX_RESPONSE_BYTES).is_ok());
+        session.execute("cell.set", json!({"cell": "A1", "input": "changed"})).unwrap();
+        assert_ne!(identity(&mut bridge, &session).change_token, expected.change_token);
+        assert_eq!(bridge.handle(&mut session, "execute", request).unwrap(), first);
     }
 
     #[test]

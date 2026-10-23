@@ -51,5 +51,6 @@ scope and known interface limits are documented in [`ROADMAP.md`](ROADMAP.md).
 
 ## License and credits
 
-GridCraft is dual-licensed under MIT or Apache-2.0. See [`LICENSE`](LICENSE), [`ATTRIBUTION.md`](ATTRIBUTION.md),
+GridCraft is dual-licensed under MIT or Apache-2.0. See [`LICENSE-MIT`](LICENSE-MIT) and
+[`LICENSE-APACHE`](LICENSE-APACHE), [`ATTRIBUTION.md`](ATTRIBUTION.md),
 and the contributor guidance in [`CONTRIBUTING.md`](CONTRIBUTING.md).

@@ -22,13 +22,13 @@ const RESOURCE_NOT_FOUND: i64 = -32002;
 /// Longest accepted message line (16 MB): bigger payloads belong in files.
 const MAX_LINE: usize = 16 * 1024 * 1024;
 
-const INSTRUCTIONS: &str = "GridCraft is a spreadsheet app (an Excel clone). Cells use A1 notation (\"B2\", \"A1:D10\", \
-\"Sheet2!A1:B3\"). Every action is a command: find ids and parameters with list_commands and run any of them with \
-execute_command. Convenience tools cover the common flow: write_range / set_cell to enter values and formulas (strings \
-starting with = are formulas), read_range / get_cell to read computed values back, format_range, create_table, \
-insert_chart, sort_range, filter, evaluate_formula (try a formula without changing the sheet), undo / redo, \
-open_workbook / save_workbook. inspect_workbook summarizes sheets, used ranges, tables, charts and names. \
-list_functions lists the worksheet functions.";
+const INSTRUCTIONS: &str = "GridCraft is a headless spreadsheet engine. Cells use A1 notation (\"B2\", \"A1:D10\", \
+\"Sheet2!A1:B3\"). Find supported command ids and parameters with list_commands; execute_command accepts commands exposed by the \
+headless capability policy, not pure editor/dialog or external-URL actions. Parameterized engine operations remain available when \
+they have a meaningful headless implementation. Convenience tools cover the common flow: write_range / set_cell to enter values and \
+formulas (strings starting with = are formulas), read_range / get_cell to read computed values back, format_range, create_table, \
+insert_chart, sort_range, filter, evaluate_formula (try a formula without changing the sheet), undo / redo, open_workbook / \
+save_workbook. inspect_workbook summarizes sheets, used ranges, tables, charts and names. list_functions lists worksheet functions.";
 
 /// Resource URIs.
 pub const WORKBOOK_URI: &str = "gridcraft://workbook";

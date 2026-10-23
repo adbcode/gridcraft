@@ -31,6 +31,7 @@ People trust GridCraft with their numbers; a crash loses their work. **This outr
 
 ## Non-negotiables
 - **Clean-room.** Microsoft Excel is installed on the dev machine and may be *observed* black-box: run it, use its UI with synthetic workbooks, take screenshots (by window id) stored only under `plan/excel/screenshots/`. Never read, disassemble or copy anything inside the Office bundle, never commit files produced by Excel, never copy GPL/AGPL/LGPL code (LibreOffice, Gnumeric…). Function behaviour comes from public documentation and observation.
+- **Fonts live in [`storytold/craft-fonts`](https://github.com/storytold/craft-fonts)**, never in this repo. They are an optional external build input via `CRAFT_FONTS_DIR`; without it, use system fonts. Never vendor or commit font files here. Standard: craftrules `standards/fonts.md`.
 - **Test corpora** (real Excel-authored files) live in a separate corpus repo, fetched pinned and sha256-verified (craftrules `standards/test-corpora.md`). Never commit large binary fixtures; build test workbooks in code.
 - **Everything is a command.** Workbook behavior lives in `crates/engine/src/cmd/*` (id, label, parameters, enablement, execution) + tests. Headless command discovery uses the shared engine agent-capability policy; pure editor/dialog and external URL actions are excluded.
 - **Programmatic calls never open dialogs**: a command with empty params runs with defaults or returns an error; only menu-style invocation opens a dialog (`UiRequest::Dialog`).

@@ -1955,9 +1955,12 @@ name = "gridcraft-server"
 version = "0.10.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "dotenvy",
  "gridcraft-engine",
  "reqwest",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2 0.11.0",

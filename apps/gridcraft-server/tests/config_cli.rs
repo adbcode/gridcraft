@@ -2,6 +2,31 @@
 use std::process::Command;
 
 #[test]
+fn invalid_ca_is_reported_before_connection_without_disclosing_it() -> Result<(), Box<dyn std::error::Error>> {
+    let file = tempfile::NamedTempFile::new()?;
+    for (key, value, expected) in [
+        ("DATABASE_SSL_ROOT_CERT_PEM", "-----BEGIN CERTIFICATE-----\\nsensitive-certificate\\n-----END CERTIFICATE-----", "literal newline escapes"),
+        ("DATABASE_SSL_ROOT_CERT_BASE64", "sensitive-certificate!", "not valid standard base64"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_gridcraft-server"))
+            .arg("migrate")
+            .env_clear()
+            .env("GRIDCRAFT_ENV_FILE", file.path())
+            .env("DATABASE_URL", "postgresql://user:sensitive-password@127.0.0.1:1/private-db")
+            .env(key, value)
+            .output()?;
+        assert!(!output.status.success());
+        let combined = format!("{}{}", String::from_utf8(output.stdout)?, String::from_utf8(output.stderr)?);
+        assert!(combined.contains("invalid service configuration") && combined.contains(expected));
+        assert!(!combined.contains("during connection"));
+        for forbidden in ["sensitive-certificate", "sensitive-password", "private-db", "BEGIN CERTIFICATE"] {
+            assert!(!combined.contains(forbidden));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn runtime_environment_overrides_private_dotenv_without_exposing_values() -> Result<(), Box<dyn std::error::Error>> {
     let file = tempfile::NamedTempFile::new()?;
     std::fs::write(file.path(), "DATABASE_URL='invalid-local-secret'\nOPENAI_API_KEY='local-secret'\nOPENAI_MODEL='local-model'\n")?;

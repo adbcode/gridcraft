@@ -1,6 +1,6 @@
 # Running the service baseline
 
-> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: minor
+> Last reviewed: 2026-10-23 · Last updated: 2026-10-23 · Change: minor
 
 The Rust server serves the existing GridCraft WASM editor and its HTTP API from one
 origin. PostgreSQL stores application data and bounded workbook files. OpenAI Chat
@@ -33,6 +33,7 @@ configuration names work locally and in Aiven Runtime.
 | `DATABASE_SSL_MODE` | `verify-full` for Aiven; `disable` only for a local loopback database |
 | `DATABASE_SSL_ROOT_CERT` | Local path to the Aiven project CA certificate |
 | `DATABASE_SSL_ROOT_CERT_PEM` | Alternative certificate contents, useful as a platform variable |
+| `DATABASE_SSL_ROOT_CERT_BASE64` | Single-line standard base64 of the entire PEM file; avoids multiline environment transport |
 | `OPENAI_API_KEY` | Backend-only provider credential |
 | `OPENAI_BASE_URL`, `OPENAI_MODEL` | Chat Completions endpoint prefix and configured model |
 | `OPENAI_REASONING_EFFORT` | Optional `reasoning_effort` request field; set `none` for models that reject function tools with reasoning on chat completions |
@@ -44,7 +45,12 @@ configuration names work locally and in Aiven Runtime.
 | `GRIDCRAFT_MIGRATE_ON_START` | Opt-in, locked schema migration before serving |
 | `GRIDCRAFT_ENV_FILE` | Optional alternative private dotenv path, selected through the process environment |
 
-Choose either the CA path or PEM setting. Keep local certificate files under ignored
+Choose exactly one of the CA path, PEM or BASE64 settings. The server reads and validates
+explicit CA inputs locally before attempting a connection, including during `check-config`.
+Invalid base64, escaped PEM newlines, missing certificates and invalid X.509 data produce
+fixed configuration errors without printing the supplied value. Inputs are limited to 1 MiB
+after decoding. Parsing is not a trust/expiry/hostname check; those checks happen during
+the `verify-full` connection. Keep local certificate files under ignored
 `secrets/`; never put secrets or certificates in `dist/web`, which is publicly served.
 Use the database connection details for the existing instance. An Aiven management
 token is not a database password and is not needed by the application.
@@ -137,6 +143,22 @@ requires **Actions → Deploy latest commit**. See
 [Runtime variables](https://aiven.io/docs/products/runtime/secrets-and-variables) and
 [deployment documentation](https://aiven.io/docs/products/runtime/deploy-apps).
 
+If multiline values are unreliable, prefer `DATABASE_SSL_ROOT_CERT_BASE64` instead of
+weakening TLS or committing a deployment-specific CA into the image. Encode the **entire
+downloaded PEM file**, not just its existing base64 body:
+
+```sh
+python3 -c 'import base64,pathlib; print(base64.b64encode(pathlib.Path("ca.pem").read_bytes()).decode("ascii"))'
+```
+
+Set that single-line output as `DATABASE_SSL_ROOT_CERT_BASE64`, and remove/unset both
+`DATABASE_SSL_ROOT_CERT_PEM` and `DATABASE_SSL_ROOT_CERT`. Keep `DATABASE_SSL_MODE=verify-full`
+and the integration-managed `DATABASE_URL`. This requires a build supporting the BASE64
+setting; older builds ignore it. Startup reports the CA source using a fixed label, never
+its contents. If a platform supports mounting configuration files, a readable mounted PEM
+at `DATABASE_SSL_ROOT_CERT` is another option; a path must exist inside the container and
+be readable by UID 10001. Merely naming a local path does not upload a file to Runtime.
+
 After deployment, check the public editor and API health endpoints, then validate
 PostgreSQL writes and file reloads before connecting live model or voice actions.
 Container construction, an available key and local HTTP mocks are separate from
@@ -152,7 +174,9 @@ settings; it cannot prove a database connection or certificate handshake works.
 
 | Diagnostic | Check before redeploying |
 |---|---|
-| Connection / TLS verification or TLS/protocol negotiation | Actual PostgreSQL service hostname, current project CA and PEM line breaks; retain `verify-full` |
+| Invalid service configuration / PostgreSQL CA | Correct the named encoding/readability error; no database connection was attempted |
+| Connection / endpoint refused TLS | Effective PostgreSQL hostname/port; the endpoint declined PostgreSQL's TLS request |
+| Connection / TLS setup or TLS/protocol negotiation | Effective host, matching CA, and any client certificate URI options; retain `verify-full` |
 | Connection / network failure or timeout | PostgreSQL service running, correct host/port and Runtime-to-database network access |
 | SQLSTATE `28P01` / `28000` | Database credentials and access policy; URI-encode special characters in passwords |
 | SQLSTATE `3D000` | Database name in the service connection URI |

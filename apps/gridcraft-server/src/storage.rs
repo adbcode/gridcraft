@@ -76,7 +76,10 @@ impl MigrationError {
 
     fn database(phase: &'static str, error: sqlx::Error) -> Self {
         let reason = match &error {
-            sqlx::Error::Tls(_) => "TLS verification failed; check the PostgreSQL hostname and project CA PEM (keep verify-full)",
+            sqlx::Error::Tls(error) if error.to_string() == "server does not support TLS" => {
+                "PostgreSQL endpoint refused TLS; check the effective host and port (keep verify-full)"
+            }
+            sqlx::Error::Tls(_) => "TLS setup failed; check CA configuration and any client certificate settings in DATABASE_URL (keep verify-full)",
             sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::InvalidData => {
                 "TLS/protocol negotiation failed; check the PostgreSQL hostname and project CA PEM (keep verify-full)"
             }
@@ -919,6 +922,8 @@ mod tests {
         assert!(!format!("{diagnostic} {diagnostic:?}").contains("private"));
         let diagnostic = MigrationError::database("connection", sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::InvalidData)));
         assert!(diagnostic.to_string().contains("TLS/protocol negotiation failed"));
+        let diagnostic = MigrationError::database("connection", sqlx::Error::Tls("server does not support TLS".into()));
+        assert!(diagnostic.to_string().contains("endpoint refused TLS"));
     }
 
     #[test]

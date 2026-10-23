@@ -9,6 +9,8 @@ use std::{
     str::FromStr,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rustls_pki_types::{CertificateDer, pem::PemObject};
 use sqlx::{
     ConnectOptions,
     postgres::{PgConnectOptions, PgSslMode},
@@ -31,8 +33,8 @@ pub struct Config {
 pub struct DatabaseConfig {
     url: String,
     ssl_mode: PgSslMode,
-    root_cert: Option<PathBuf>,
-    root_cert_pem: Option<String>,
+    root_cert_pem: Option<Vec<u8>>,
+    ca_source: &'static str,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,12 +87,9 @@ impl Config {
                 "disable" if is_loopback(parsed.host_str().unwrap_or_default()) => PgSslMode::Disable,
                 _ => return Err(ConfigError("DATABASE_SSL_MODE must be verify-full; disable is allowed only for loopback PostgreSQL")),
             };
-            let root_cert = value("DATABASE_SSL_ROOT_CERT").map(PathBuf::from);
-            let root_cert_pem = value("DATABASE_SSL_ROOT_CERT_PEM").map(str::to_owned);
-            if root_cert.is_some() && root_cert_pem.is_some() {
-                return Err(ConfigError("configure only one PostgreSQL CA source"));
-            }
-            let db = DatabaseConfig { url: url.to_owned(), ssl_mode, root_cert, root_cert_pem };
+            let (root_cert_pem, ca_source) =
+                load_postgres_ca(value("DATABASE_SSL_ROOT_CERT"), value("DATABASE_SSL_ROOT_CERT_PEM"), value("DATABASE_SSL_ROOT_CERT_BASE64"))?;
+            let db = DatabaseConfig { url: url.to_owned(), ssl_mode, root_cert_pem, ca_source };
             db.options()?;
             Some(db)
         } else {
@@ -130,6 +129,10 @@ impl Config {
 }
 
 impl DatabaseConfig {
+    pub fn ca_source(&self) -> &'static str {
+        self.ca_source
+    }
+
     pub fn options(&self) -> Result<PgConnectOptions, ConfigError> {
         // Force the verified policy even if the Aiven URI includes sslmode=require.
         // Explicit URI SSL parameters cannot weaken this setting.
@@ -141,17 +144,55 @@ impl DatabaseConfig {
         if matches!(self.ssl_mode, PgSslMode::Disable) && !is_loopback(options.get_host()) {
             return Err(ConfigError("PostgreSQL URI overrides must not disable TLS for a remote host"));
         }
-        if let Some(path) = &self.root_cert {
-            if !path.is_file() {
-                return Err(ConfigError("DATABASE_SSL_ROOT_CERT is not a readable certificate file"));
-            }
-            options = options.ssl_root_cert(path);
-        }
         if let Some(pem) = &self.root_cert_pem {
-            options = options.ssl_root_cert_from_pem(pem.as_bytes().to_vec());
+            options = options.ssl_root_cert_from_pem(pem.clone());
         }
         Ok(options)
     }
+}
+
+fn load_postgres_ca(path: Option<&str>, pem: Option<&str>, encoded: Option<&str>) -> Result<(Option<Vec<u8>>, &'static str), ConfigError> {
+    const MAX_CA_BYTES: usize = 1024 * 1024;
+    if [path.is_some(), pem.is_some(), encoded.is_some()].into_iter().filter(|present| *present).count() > 1 {
+        return Err(ConfigError("configure only one PostgreSQL CA source: file, PEM, or BASE64"));
+    }
+    let (data, source) = if let Some(path) = path {
+        let file = std::fs::File::open(path).map_err(|_| ConfigError("DATABASE_SSL_ROOT_CERT is not a readable certificate file"))?;
+        let mut data = Vec::new();
+        file.take((MAX_CA_BYTES + 1) as u64)
+            .read_to_end(&mut data)
+            .map_err(|_| ConfigError("DATABASE_SSL_ROOT_CERT is not a readable certificate file"))?;
+        (data, "file")
+    } else if let Some(pem) = pem {
+        if pem.len() > MAX_CA_BYTES {
+            return Err(ConfigError("PostgreSQL CA exceeds the 1 MiB limit"));
+        }
+        if pem.contains("\\n") || pem.contains("\\r") {
+            return Err(ConfigError("PostgreSQL CA PEM contains literal newline escapes; use real line breaks or DATABASE_SSL_ROOT_CERT_BASE64"));
+        }
+        (pem.as_bytes().to_vec(), "PEM")
+    } else if let Some(encoded) = encoded {
+        if encoded.len() > MAX_CA_BYTES * 2 {
+            return Err(ConfigError("PostgreSQL encoded CA exceeds the size limit"));
+        }
+        let compact: Vec<u8> = encoded.bytes().filter(|byte| !byte.is_ascii_whitespace()).collect();
+        let data = STANDARD.decode(compact).map_err(|_| ConfigError("DATABASE_SSL_ROOT_CERT_BASE64 is not valid standard base64"))?;
+        (data, "base64")
+    } else {
+        return Ok((None, "driver defaults (no explicit CA)"));
+    };
+    if data.len() > MAX_CA_BYTES {
+        return Err(ConfigError("PostgreSQL CA exceeds the 1 MiB limit"));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in CertificateDer::pem_slice_iter(&data) {
+        let certificate = certificate.map_err(|_| ConfigError("PostgreSQL CA PEM encoding is invalid; supply the complete certificate"))?;
+        roots.add(certificate).map_err(|_| ConfigError("PostgreSQL CA contains an invalid X.509 certificate"))?;
+    }
+    if roots.is_empty() {
+        return Err(ConfigError("PostgreSQL CA contains no PEM certificates; BASE64 must encode the entire PEM file, including BEGIN and END lines"));
+    }
+    Ok((Some(data), source))
 }
 
 fn is_loopback(host: &str) -> bool {
@@ -178,6 +219,66 @@ fn read_dotenv(path: &Path) -> Result<BTreeMap<String, String>, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_CA: &str = "-----BEGIN CERTIFICATE-----
+MIIBoDCCAUegAwIBAgIUFHsozzV1FHf9zh7ppkJYSjB0BzAwCgYIKoZIzj0EAwIw
+JjEkMCIGA1UEAwwbR3JpZENyYWZ0IHN5bnRoZXRpYyB0ZXN0IENBMB4XDTI2MTAy
+MzEzMzAyNFoXDTM2MTAyMDEzMzAyNFowJjEkMCIGA1UEAwwbR3JpZENyYWZ0IHN5
+bnRoZXRpYyB0ZXN0IENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFOlUTeet
+TqLxXrt0EEzChSkdS/VQBn8QSImEkcgxtd0q3BxOs+P7lQQqoTLBPUTg1Iav50pP
+2KYrp/9pdtUZHKNTMFEwHQYDVR0OBBYEFMIIUscYS+o/Ia4RO20UX2/qpIXyMB8G
+A1UdIwQYMBaAFMIIUscYS+o/Ia4RO20UX2/qpIXyMA8GA1UdEwEB/wQFMAMBAf8w
+CgYIKoZIzj0EAwIDRwAwRAIgCNaYBU5kw4pRXgjdxip/AbIJb3H76e/ccystqIl+
+vaMCIA+BiPV9Ehn14ZV4um7T9CNGA+4Nda1beq4UNdTRx/Ol
+-----END CERTIFICATE-----
+";
+
+    #[test]
+    fn ca_sources_preserve_certificate_bytes_and_verified_policy() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), TEST_CA).unwrap();
+        let encoded = STANDARD.encode(TEST_CA);
+        let wrapped = format!(" \n{}\r\n{}\n", &encoded[..64], &encoded[64..]);
+        for (key, value, source) in [
+            ("DATABASE_SSL_ROOT_CERT", file.path().to_str().unwrap(), "file"),
+            ("DATABASE_SSL_ROOT_CERT_PEM", TEST_CA, "PEM"),
+            ("DATABASE_SSL_ROOT_CERT_BASE64", wrapped.as_str(), "base64"),
+        ] {
+            let config =
+                Config::from_values(&values(&[("DATABASE_URL", "postgresql://user:secret@db.example/db?sslmode=require"), (key, value)])).unwrap();
+            let database = config.database.unwrap();
+            assert_eq!(database.root_cert_pem.as_deref(), Some(TEST_CA.as_bytes()));
+            assert_eq!(database.ca_source(), source);
+            assert!(matches!(database.options().unwrap().get_ssl_mode(), PgSslMode::VerifyFull));
+        }
+        let bundle = format!("{TEST_CA}{TEST_CA}");
+        assert!(load_postgres_ca(None, Some(&bundle), None).is_ok());
+        assert!(load_postgres_ca(None, Some(&TEST_CA.replace('\n', "\r\n")), None).is_ok());
+    }
+
+    #[test]
+    fn malformed_or_conflicting_ca_sources_fail_locally_without_values() {
+        let escaped = TEST_CA.replace('\n', "\\n");
+        let malformed = "-----BEGIN CERTIFICATE-----\nsensitive-value\n-----END CERTIFICATE-----";
+        let invalid_der = "-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----";
+        for (path, pem, encoded, expected) in [
+            (None, Some(escaped.as_str()), None, "literal newline escapes"),
+            (None, Some("sensitive-value"), None, "no PEM certificates"),
+            (None, Some(malformed), None, "PEM encoding is invalid"),
+            (None, Some(invalid_der), None, "invalid X.509"),
+            (None, None, Some("sensitive-value"), "not valid standard base64"),
+            (Some("/nonexistent/sensitive-value"), None, None, "not a readable"),
+            (Some("sensitive-value"), Some(TEST_CA), None, "only one"),
+            (Some("sensitive-value"), None, Some("sensitive-value"), "only one"),
+            (None, Some(TEST_CA), Some("sensitive-value"), "only one"),
+        ] {
+            let error = load_postgres_ca(path, pem, encoded).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("sensitive-value") && !error.contains("BEGIN CERTIFICATE"));
+        }
+        assert!(load_postgres_ca(None, None, Some(&STANDARD.encode("not a certificate"))).is_err());
+        assert!(load_postgres_ca(None, Some(&"x".repeat(1024 * 1024 + 1)), None).is_err());
+    }
 
     fn values(items: &[(&str, &str)]) -> BTreeMap<String, String> {
         items.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()

@@ -34,6 +34,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("unknown command; use --help".into());
     }
     let mut config = Config::load()?;
+    if let Some(database) = &config.database {
+        println!(
+            "PostgreSQL CA input validated; source: {}. Server identity is verified during connection when using verify-full.",
+            database.ca_source()
+        );
+    }
     let openai_configured = config.openai.is_some();
     let speech_configured = config.elevenlabs.is_some();
     let tts_configured = config.elevenlabs.as_ref().is_some_and(|provider| provider.voice_id.is_some());

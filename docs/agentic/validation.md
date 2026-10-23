@@ -1,6 +1,35 @@
 # Foundation and service validation
 
-> Last reviewed: 2026-10-22 · Last updated: 2026-10-22 · Change: minor
+> Last reviewed: 2026-10-23 · Last updated: 2026-10-23 · Change: minor
+
+## Robust PostgreSQL CA inputs — 2026-10-23
+
+`DATABASE_SSL_ROOT_CERT_BASE64` is validated alongside the file and multiline PEM
+sources before connecting; certificate verification remains `verify-full`. Local
+migration smoke tests used PostgreSQL 14/main, the disposable
+`gridcraft_workspace_diagnostics_test` database, `devin-box`, and the local snakeoil
+certificate only. No Aiven or production database was contacted.
+
+- `cargo check --offline -p gridcraft-server`: passed; Cargo.lock gained only the
+  required dependency-list entries, with no dependency version upgrades.
+- `cargo fmt --all`: passed.
+- `cargo test --locked -p gridcraft-server --lib config::tests`: 6 passed.
+- `cargo test --locked -p gridcraft-server --test config_cli`: 3 passed.
+- `cargo test --locked -p gridcraft-server --lib storage::tests::migration_diagnostics`:
+  2 passed.
+- `make check`: formatting, locked server check, and strict clippy passed.
+- `cargo test --locked -p gridcraft-server`: 29 passed; 10 opt-in tests were ignored.
+- Local CLI `migrate` smoke tests with PEM, file, and BASE64 CA inputs all succeeded.
+  The BASE64 case rejected a hostname mismatch even with `sslmode=disable` in the
+  URL, and malformed literal-escaped PEM was rejected before connecting.
+- Offline `check-config` using the supplied CA passed for PEM and BASE64, reporting
+  no network checks. The wrapper exited nonzero only during cleanup, after both
+  checks passed, because it tried to remove an already-deleted temporary file.
+- `cargo xtask ci`: all 8 steps passed (fmt, clippy, test, assets, layers, wasm,
+  parity, keytips).
+
+These results establish local validation only; no production success or root cause
+is claimed.
 
 ## Workspace migration startup diagnostics — 2026-10-22
 
